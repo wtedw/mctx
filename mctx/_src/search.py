@@ -108,6 +108,7 @@ def search(
   tree = instantiate_tree_from_root(root, num_simulations,
                                     root_invalid_actions=invalid_actions,
                                     extra_data=extra_data)
+  jax.debug.inspect_array_sharding(tree, callback=print)
   _, tree = loop_fn(
       0, num_simulations, body_fun, (rng_key, tree))
 
