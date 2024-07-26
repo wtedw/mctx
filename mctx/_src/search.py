@@ -41,7 +41,7 @@ def search(
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
     loop_fn: base.LoopFn = jax.lax.fori_loop,
-    sharding=None) -> Tree:
+    sharding: Optional[jax.sharding.Sharding] = None) -> Tree:
   """Performs a full search and returns sampled actions.
 
   In the shape descriptions, `B` denotes the batch dimension.

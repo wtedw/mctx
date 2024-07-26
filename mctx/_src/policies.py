@@ -43,7 +43,7 @@ def muzero_policy(
     pb_c_init: chex.Numeric = 1.25,
     pb_c_base: chex.Numeric = 19652,
     temperature: chex.Numeric = 1.0,
-    sharding=None) -> base.PolicyOutput[None]:
+    sharding: Optional[jax.sharding.Sharding] = None) -> base.PolicyOutput[None]:
   """Runs MuZero search and returns the `PolicyOutput`.
 
   In the shape descriptions, `B` denotes the batch dimension.
