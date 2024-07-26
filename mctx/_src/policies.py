@@ -42,7 +42,8 @@ def muzero_policy(
     dirichlet_alpha: chex.Numeric = 0.3,
     pb_c_init: chex.Numeric = 1.25,
     pb_c_base: chex.Numeric = 19652,
-    temperature: chex.Numeric = 1.0) -> base.PolicyOutput[None]:
+    temperature: chex.Numeric = 1.0,
+    sharding=None) -> base.PolicyOutput[None]:
   """Runs MuZero search and returns the `PolicyOutput`.
 
   In the shape descriptions, `B` denotes the batch dimension.
@@ -108,7 +109,8 @@ def muzero_policy(
       num_simulations=num_simulations,
       max_depth=max_depth,
       invalid_actions=invalid_actions,
-      loop_fn=loop_fn)
+      loop_fn=loop_fn,
+      sharding=sharding)
 
   # Sampling the proposed action proportionally to the visit counts.
   summary = search_tree.summary()

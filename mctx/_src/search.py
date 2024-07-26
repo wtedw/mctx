@@ -40,7 +40,8 @@ def search(
     max_depth: Optional[int] = None,
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
-    loop_fn: base.LoopFn = jax.lax.fori_loop) -> Tree:
+    loop_fn: base.LoopFn = jax.lax.fori_loop,
+    sharding=None) -> Tree:
   """Performs a full search and returns sampled actions.
 
   In the shape descriptions, `B` denotes the batch dimension.
@@ -108,10 +109,17 @@ def search(
   tree = instantiate_tree_from_root(root, num_simulations,
                                     root_invalid_actions=invalid_actions,
                                     extra_data=extra_data)
+  if sharding is not None:
+      tree = jax.lax.with_sharding_constraint(tree, sharding)
+
   jax.debug.inspect_array_sharding(tree, callback=print)
   _, tree = loop_fn(
       0, num_simulations, body_fun, (rng_key, tree))
 
+  def print_final_tree(x):
+      print("final tree", x)
+
+  jax.debug.inspect_array_sharding(tree, callback=print_final_tree)
   return tree
 
 
