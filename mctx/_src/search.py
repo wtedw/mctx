@@ -112,14 +112,14 @@ def search(
   if sharding is not None:
       tree = jax.lax.with_sharding_constraint(tree, sharding)
 
-  jax.debug.inspect_array_sharding(tree, callback=print)
+  # jax.debug.inspect_array_sharding(tree, callback=print)
   _, tree = loop_fn(
       0, num_simulations, body_fun, (rng_key, tree))
 
-  def print_final_tree(x):
-      print("final tree", x)
+  # def print_final_tree(x):
+  #     print("final tree", x)
 
-  jax.debug.inspect_array_sharding(tree, callback=print_final_tree)
+  # jax.debug.inspect_array_sharding(tree, callback=print_final_tree)
   return tree
 
 

@@ -118,10 +118,15 @@ def muzero_policy(
   action_logits = _apply_temperature(
       _get_logits_from_probs(action_weights), temperature)
   action = jax.random.categorical(rng_key, action_logits)
-  return base.PolicyOutput(
+
+  output = base.PolicyOutput(
       action=action,
       action_weights=action_weights,
       search_tree=search_tree)
+
+  # jax.debug.inspect_array_sharding(output, callback=lambda x: print("mctx output", x))
+
+  return output
 
 
 def gumbel_muzero_policy(
