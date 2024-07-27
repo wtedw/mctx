@@ -160,6 +160,14 @@ def simulate(
 
   def body_fun(state):
     # Preparing the next simulation state.
+    print("sim body1 > ", state.rng_key.shape)
+    print("sim body2 > ", state.node_index.shape)
+    print("sim body3 > ", state.action.shape)
+    print("sim body4 > ", state.next_node_index.shape)
+    print("sim body5 > ", state.depth.shape)
+    print("sim body6 > ", state.is_continuing.shape)
+
+
     node_index = state.next_node_index
     rng_key, action_selection_key = jax.random.split(state.rng_key)
     action = action_selection_fn(action_selection_key, tree, node_index,
@@ -190,11 +198,10 @@ def simulate(
       is_continuing=jnp.array(True))
 
   # hardcode this in
-  P = jax.sharding.PartitionSpec
-  mesh = jax.sharding.Mesh(jax.devices(), 'x')
-  sharding = jax.sharding.NamedSharding(mesh, P('x'))
-
-  initial_state = jax.lax.with_sharding_constraint(initial_state, sharding)
+  # P = jax.sharding.PartitionSpec
+  # mesh = jax.sharding.Mesh(jax.devices(), 'x')
+  # sharding = jax.sharding.NamedSharding(mesh, P('x'))
+  # initial_state = jax.lax.with_sharding_constraint(initial_state, sharding)
 
   jax.debug.inspect_array_sharding(initial_state.rng_key, callback=lambda x: print("simul init1: ", x))
   jax.debug.inspect_array_sharding(initial_state.node_index, callback=lambda x: print("simul init2: ", x))
