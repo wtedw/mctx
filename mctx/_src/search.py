@@ -189,7 +189,12 @@ def simulate(
       depth=depth,
       is_continuing=jnp.array(True))
 
-  jax.debug.inspect_array_sharding(initial_state, callback=lambda x: print("simul init: ", x))
+  jax.debug.inspect_array_sharding(initial_state.rng_key, callback=lambda x: print("simul init1: ", x))
+  jax.debug.inspect_array_sharding(initial_state.node_index, callback=lambda x: print("simul init2: ", x))
+  jax.debug.inspect_array_sharding(initial_state.action, callback=lambda x: print("simul init3: ", x))
+  jax.debug.inspect_array_sharding(initial_state.next_node_index, callback=lambda x: print("simul init4: ", x))
+  jax.debug.inspect_array_sharding(initial_state.depth, callback=lambda x: print("simul init5: ", x))
+  jax.debug.inspect_array_sharding(initial_state.is_continuing, callback=lambda x: print("simul init6: ", x))
 
   # pytype: enable=wrong-arg-types
   end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
