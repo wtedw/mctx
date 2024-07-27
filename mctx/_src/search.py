@@ -178,6 +178,15 @@ def simulate(
     is_before_depth_cutoff = depth < max_depth
     is_visited = next_node_index != Tree.UNVISITED
     is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
+
+    jax.debug.inspect_array_sharding(rng_key, callback=lambda x: print("-simul init1: ", x))
+    jax.debug.inspect_array_sharding(node_index, callback=lambda x: print("-simul init2: ", x))
+    jax.debug.inspect_array_sharding(action, callback=lambda x: print("-simul init3: ", x))
+    jax.debug.inspect_array_sharding(next_node_index, callback=lambda x: print("-simul init4: ", x))
+    jax.debug.inspect_array_sharding(depth, callback=lambda x: print("-simul init5: ", x))
+    jax.debug.inspect_array_sharding(is_continuing, callback=lambda x: print("-simul init6: ", x))
+
+
     return _SimulationState(  # pytype: disable=wrong-arg-types  # jax-types
         rng_key=rng_key,
         node_index=node_index,
