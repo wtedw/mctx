@@ -189,13 +189,13 @@ def simulate(
       depth=depth,
       is_continuing=jnp.array(True))
 
-  jax.debug.inspect_array_sharding(initial_state, callback=lambda x: print("simul init: ", initial_state))
+  jax.debug.inspect_array_sharding(initial_state, callback=lambda x: print("simul init: ", x))
 
   # pytype: enable=wrong-arg-types
   end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
 
 
-  jax.debug.inspect_array_sharding(initial_state, callback=lambda x: print("simul end: ", end_state))
+  jax.debug.inspect_array_sharding(end_state, callback=lambda x: print("simul end: ", x))
 
   # Returning a node with a selected action.
   # The action can be already visited, if the max_depth is reached.
