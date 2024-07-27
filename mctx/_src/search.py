@@ -189,6 +189,13 @@ def simulate(
       depth=depth,
       is_continuing=jnp.array(True))
 
+  # hardcode this in
+  P = jax.sharding.PartitionSpec
+  mesh = jax.sharding.Mesh(jax.devices(), 'x')
+  sharding = jax.sharding.NamedSharding(mesh, P('x'))
+
+  initial_state = jax.lax.with_sharding_constraint(initial_state, sharding)
+
   jax.debug.inspect_array_sharding(initial_state.rng_key, callback=lambda x: print("simul init1: ", x))
   jax.debug.inspect_array_sharding(initial_state.node_index, callback=lambda x: print("simul init2: ", x))
   jax.debug.inspect_array_sharding(initial_state.action, callback=lambda x: print("simul init3: ", x))
