@@ -15,7 +15,7 @@
 """A data structure used to hold / inspect search data for a batch of inputs."""
 
 from __future__ import annotations
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar, Optional
 
 import chex
 import jax
@@ -69,9 +69,11 @@ class Tree(Generic[T]):
   children_values: chex.Array  # [B, N, num_actions]
   embeddings: Any  # [B, N, ...]
   root_invalid_actions: chex.Array  # [B, num_actions]
-  completed_qvalues: chex.Array  # [B, num_actions]
-  to_argmax: chex.Array          # [B, num_actions]
   extra_data: T  # [B, ...]
+  # completed_qvalues: chex.Array  # [B, num_actions]
+  # to_argmax: chex.Array          # [B, num_actions]
+  completed_qvalues: Optional[chex.Array] = None
+  to_argmax: Optional[chex.Array] = None
 
   # The following attributes are class variables (and should not be set on
   # Tree instances).
