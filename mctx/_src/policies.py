@@ -234,10 +234,6 @@ def gumbel_muzero_policy(
   completed_search_logits = _mask_invalid_actions(
       root.prior_logits + completed_qvalues, invalid_actions)
 
-  print(">> completed qvals", completed_qvalues.shape)
-  print(">> completed toargmax", to_argmax.shape)
-  print(">> completed searchlogits", completed_search_logits.shape)
-
   action_weights = jax.nn.softmax(completed_search_logits)
   return base.PolicyOutput(
       action=action,
