@@ -221,6 +221,12 @@ def gumbel_muzero_policy(
       summary.visit_counts)
   action = action_selection.masked_argmax(to_argmax, invalid_actions)
 
+  # Update the search_tree with completed_qvalues and to_argmax
+  search_tree = search_tree.replace(
+      completed_qvalues=completed_qvalues,
+      to_argmax=to_argmax
+  )
+
   # Producing action_weights usable to train the policy network.
   completed_search_logits = _mask_invalid_actions(
       root.prior_logits + completed_qvalues, invalid_actions)
