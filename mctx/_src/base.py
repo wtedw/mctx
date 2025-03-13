@@ -14,7 +14,7 @@
 # ==============================================================================
 """Core types used in mctx."""
 
-from typing import Any, Callable, Generic, TypeVar, Tuple
+from typing import Any, Callable, Generic, Optional, TypeVar, Tuple
 
 import chex
 
@@ -96,7 +96,8 @@ class PolicyOutput(Generic[T]):
   """
   action: chex.Array
   action_weights: chex.Array
-  search_tree: tree.Tree[T]
+  # search_tree: tree.Tree[T]
+  search_tree: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)

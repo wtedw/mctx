@@ -121,6 +121,88 @@ def muzero_policy(
       action_weights=action_weights,
       search_tree=search_tree)
 
+def gumbel_muzero_policy_bfs(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    num_simulations: int,
+    *,
+    invalid_actions: Optional[chex.Array] = None,
+    qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
+    gumbel_scale: chex.Numeric = 1.0
+) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
+  """Optimized Gumbel MuZero policy for num_simulations=2 via a parallel BFS expansion.
+
+  This version assumes only one “expansion” level is needed, so that all actions from the
+  root are expanded in parallel. This eliminates loops and is TPU‐friendly.
+  """
+  # --- 1. Preprocess the root.
+  # Mask out any invalid actions in the root logits.
+  root = root.replace(
+      prior_logits=_mask_invalid_actions(root.prior_logits, invalid_actions))
+
+  chex.assert_rank(root.prior_logits, 2)
+  batch_size, num_actions = root.prior_logits.shape
+
+  # --- 2. Generate Gumbel noise (same shape as the logits).
+  rng_key, gumbel_rng = jax.random.split(rng_key)
+  gumbel = gumbel_scale * jax.random.gumbel(
+      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  # --- 3. Expand all actions from the root in parallel.
+  # Create an array of actions: shape [num_actions]
+  actions = jnp.arange(num_actions, dtype=jnp.int32)
+
+  # For each batch element, we want to apply the recurrent function to every action.
+  # We need to provide a separate rng_key per (batch, action) pair.
+  total_keys = batch_size * num_actions
+  rng_keys = jax.random.split(rng_key, total_keys).reshape(batch_size, num_actions, -1)
+
+  # Define a function to expand one action given a root embedding.
+  def expand_action(embedding, a, key):
+    # Note: recurrent_fn is expected to return (RecurrentFnOutput, new_embedding)
+    # Here we do not need the new embedding for further simulation.
+    output, _ = recurrent_fn(params, key, a, embedding)
+    return output
+
+  # Vectorize over the action dimension first, then over the batch.
+  # This yields a pytree of RecurrentFnOutput for each action at the root.
+  expand_batch = lambda emb, keys: jax.vmap(
+      lambda a, key: expand_action(emb, a, key)
+  )(actions, keys)
+  child_outputs = jax.vmap(expand_batch)(root.embedding, rng_keys)
+  # Assume that child_outputs.value has shape [batch_size, num_actions]
+  child_values = child_outputs.value
+
+  # (Optionally, one could apply qtransform here. For a one-step expansion, one simple choice is to treat
+  # the child value as the “completed” Q-value. You may also combine it with root.value if desired.)
+  qvalues = child_values  # or: qvalues = qtransform(child_values) if appropriate
+
+  # --- 4. Compute a score for each action.
+  # [ted] This needs to be expanded, bcuz it doesn't consider reward
+  # With only one simulation, the “Sequential Halving” part is trivial so we just sum:
+  # score = gumbel + (root prior logits) + (completed Q-value)
+  score = gumbel + root.prior_logits + qvalues
+
+  # Mask invalid actions if provided.
+  # if invalid_actions is not None:
+  #   chex.assert_equal_shape([score, invalid_actions])
+  #   score = jnp.where(jnp.array(invalid_actions, dtype=bool), -jnp.inf, score)
+
+  # # --- 5. Select the best action.
+  # selected_action = jnp.argmax(score, axis=-1).astype(jnp.int32)
+  action = action_selection.masked_argmax(score, invalid_actions)
+
+  # For training purposes, one might compute action weights via a softmax.
+  completed_search_logits = _mask_invalid_actions(
+      root.prior_logits + qvalues, invalid_actions)
+  action_weights = jax.nn.softmax(completed_search_logits)
+
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+  )
 
 def gumbel_muzero_policy(
     params: base.Params,
