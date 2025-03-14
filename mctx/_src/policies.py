@@ -160,30 +160,28 @@ def gumbel_muzero_policy_bfs(
   rng_keys = jax.random.split(rng_key, total_keys).reshape(batch_size, num_actions, -1)
 
   # opt 3
-  def expand_all_actions_flat(params, recurrent_fn, root_embedding, rng_keys, actions):
+  def expand_all_actions_flat(params, recurrent_fn, root_embedding, rng_keys, actions, batch_size, num_actions):
     """
-    Merges the batch dimension B and the number of actions N, calls recurrent_fn,
-    and then reshapes the outputs back.
+    Merges the batch dimension (B) and the number of actions (N), calls recurrent_fn
+    once over the merged batch, and then reshapes the outputs back to [B, N, ...].
 
     Args:
     params: parameters for recurrent_fn.
     recurrent_fn: function with signature (params, rng_key, action, embedding)
-                    that expects a batched embedding of shape [B, ...].
-    root_embedding: the embeddings from the root, with shape [B, ...].
-    rng_keys: an array of rng_keys with shape [B, N, key_dim] (one per action per batch).
+                    that expects a batched embedding with shape [B, ...].
+    root_embedding: the embeddings from the root, a pytree (e.g. a dataclass)
+                    whose array leaves have shape [B, ...].
+    rng_keys: an array of RNG keys with shape [B, N, key_dim].
     actions: a 1D array of actions of shape [N].
+    batch_size: number of examples (B).
+    num_actions: number of actions (N).
 
     Returns:
     outputs: a pytree of outputs with shape [B, N, ...].
     new_embedding: a pytree of new embeddings with shape [B, N, ...].
     """
-    # Get batch size B and number of actions N.
-    B = root_embedding.shape[0]
-    N = actions.shape[0]
-
-    # For each batch element, replicate the actions so that each has shape [N],
-    # then flatten to shape [B*N].
-    flat_actions = jnp.broadcast_to(actions, (B, N)).reshape(-1)
+    # Flatten actions: shape [B * N]
+    flat_actions = jnp.broadcast_to(actions, (batch_size, num_actions)).reshape(-1)
 
     # Flatten the rng_keys from [B, N, key_dim] to [B*N, key_dim].
     flat_keys = rng_keys.reshape(-1, rng_keys.shape[-1])
@@ -192,7 +190,7 @@ def gumbel_muzero_policy_bfs(
     # we use jax.tree_map to replicate each array leaf.
     def replicate_leaf(x):
         # x has shape [B, ...]; we want each batch element repeated N times along axis 0.
-        return jnp.repeat(x, N, axis=0)
+        return jnp.repeat(x, num_actions, axis=0)
     flat_embedding = jax.tree_map(replicate_leaf, root_embedding)
 
     # Call recurrent_fn once over the flattened (B*N) dimension.
@@ -200,7 +198,7 @@ def gumbel_muzero_policy_bfs(
 
     # Reshape outputs back to [B, N, ...]. We do this for every array leaf.
     def unflatten(x):
-        return x.reshape((B, N) + x.shape[1:])
+      return x.reshape((batch_size, num_actions) + x.shape[1:])
     outputs = jax.tree_map(unflatten, flat_outputs)
     new_embedding = jax.tree_map(unflatten, flat_new_embedding)
 
@@ -211,7 +209,9 @@ def gumbel_muzero_policy_bfs(
       recurrent_fn,     # your recurrent function
       root.embedding,   # batched embedding, shape: [B, ...]
       rng_keys,         # shape: [B, num_actions, key_dim]
-      actions           # shape: [num_actions]
+      actions,          # shape: [num_actions]
+      batch_size,
+      num_actions
   )
   # Now, outputs and new_embedding will have shape [B, num_actions, ...] according to your recurrent_fn outputs.
 
