@@ -23,10 +23,13 @@ from mctx._src import tree as tree_lib
 def compute_bfs_completed_qvalues(
     children_outputs,  # a pytree with fields: reward, discount, value; shape [B, num_actions]
     root,              # a RootFnOutput (only root.value might be needed for reference)
-    value_scale: jnp.Numeric = 0.1,
-    maxvisit_init: jnp.Numeric = 50.0,
-    rescale_values: bool = True,
-    epsilon: jnp.Numeric = 1e-8,
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
+    rescale_values: bool = False,
+    # [ted] maybe reintroduce if larger board sizes
+    # and we only visit a subset of actions
+    # use_mixed_value: bool = True,
+    epsilon: chex.Numeric = 1e-8,
 ):
   """
   Computes completed Q-values for the root from a one-layer expansion.
@@ -48,16 +51,13 @@ def compute_bfs_completed_qvalues(
 
   # Optionally, rescale the Q-values to [0, 1].
   if rescale_values:
-    min_val = jnp.min(qvalues, axis=-1, keepdims=True)
-    max_val = jnp.max(qvalues, axis=-1, keepdims=True)
-    qvalues = (qvalues - min_val) / jnp.maximum(max_val - min_val, epsilon)
+    qvalues = _rescale_qvalues(qvalues, epsilon)
 
   # Compute scaling factor:
   # With every action visited exactly once, max(visit_counts) == 1.
   visit_scale = maxvisit_init + 1
   final_qvalues = (visit_scale * value_scale) * qvalues
   return final_qvalues
-
 
 def qtransform_by_min_max(
     tree: tree_lib.Tree,
