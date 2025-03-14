@@ -159,25 +159,68 @@ def gumbel_muzero_policy_bfs(
   total_keys = batch_size * num_actions
   rng_keys = jax.random.split(rng_key, total_keys).reshape(batch_size, num_actions, -1)
 
-  # Define a function to expand one action given a root embedding.
-  def expand_action(embedding, a, key):
-    # Note: recurrent_fn is expected to return (RecurrentFnOutput, new_embedding)
-    # Here we do not need the new embedding for further simulation.
-    output, _ = recurrent_fn(params, key, a, embedding)
-    return output
+  # opt 3
+  def expand_all_actions_flat(params, recurrent_fn, root_embedding, rng_keys, actions):
+    """
+    Merges the batch dimension B and the number of actions N, calls recurrent_fn,
+    and then reshapes the outputs back.
 
-  # Vectorize over the action dimension first, then over the batch.
-  # This yields a pytree of RecurrentFnOutput for each action at the root.
-  expand_batch = lambda emb, keys: jax.vmap(
-      lambda a, key: expand_action(emb, a, key)
-  )(actions, keys)
-  child_outputs = jax.vmap(expand_batch)(root.embedding, rng_keys)
+    Args:
+    params: parameters for recurrent_fn.
+    recurrent_fn: function with signature (params, rng_key, action, embedding)
+                    that expects a batched embedding of shape [B, ...].
+    root_embedding: the embeddings from the root, with shape [B, ...].
+    rng_keys: an array of rng_keys with shape [B, N, key_dim] (one per action per batch).
+    actions: a 1D array of actions of shape [N].
+
+    Returns:
+    outputs: a pytree of outputs with shape [B, N, ...].
+    new_embedding: a pytree of new embeddings with shape [B, N, ...].
+    """
+    # Get batch size B and number of actions N.
+    B = root_embedding.shape[0]
+    N = actions.shape[0]
+
+    # For each batch element, replicate the actions so that each has shape [N],
+    # then flatten to shape [B*N].
+    flat_actions = jnp.broadcast_to(actions, (B, N)).reshape(-1)
+
+    # Flatten the rng_keys from [B, N, key_dim] to [B*N, key_dim].
+    flat_keys = rng_keys.reshape(-1, rng_keys.shape[-1])
+
+    # Replicate the embedding for each action. If root_embedding is a pytree,
+    # we use jax.tree_map to replicate each array leaf.
+    def replicate_leaf(x):
+        # x has shape [B, ...]; we want each batch element repeated N times along axis 0.
+        return jnp.repeat(x, N, axis=0)
+    flat_embedding = jax.tree_map(replicate_leaf, root_embedding)
+
+    # Call recurrent_fn once over the flattened (B*N) dimension.
+    flat_outputs, flat_new_embedding = recurrent_fn(params, flat_keys, flat_actions, flat_embedding)
+
+    # Reshape outputs back to [B, N, ...]. We do this for every array leaf.
+    def unflatten(x):
+        return x.reshape((B, N) + x.shape[1:])
+    outputs = jax.tree_map(unflatten, flat_outputs)
+    new_embedding = jax.tree_map(unflatten, flat_new_embedding)
+
+    return outputs, new_embedding
+
+  children_outputs, _ = expand_all_actions_flat(
+      params,           # your parameters
+      recurrent_fn,     # your recurrent function
+      root.embedding,   # batched embedding, shape: [B, ...]
+      rng_keys,         # shape: [B, num_actions, key_dim]
+      actions           # shape: [num_actions]
+  )
+  # Now, outputs and new_embedding will have shape [B, num_actions, ...] according to your recurrent_fn outputs.
+
   # Assume that child_outputs.value has shape [batch_size, num_actions]
-  child_values = child_outputs.value
+  children_values = children_outputs.value
 
   # (Optionally, one could apply qtransform here. For a one-step expansion, one simple choice is to treat
   # the child value as the “completed” Q-value. You may also combine it with root.value if desired.)
-  qvalues = child_values  # or: qvalues = qtransform(child_values) if appropriate
+  qvalues = children_values  # or: qvalues = qtransform(child_values) if appropriate
 
   # --- 4. Compute a score for each action.
   # [ted] This needs to be expanded, bcuz it doesn't consider reward
