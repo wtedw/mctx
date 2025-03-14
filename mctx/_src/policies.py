@@ -129,11 +129,11 @@ def gumbel_muzero_policy_bfs(
     num_simulations: int,
     *,
     invalid_actions: Optional[chex.Array] = None,
-    gumbel_scale: jnp.Numeric = 1.0,
-    value_scale: jnp.Numeric = 0.1,
-    maxvisit_init: jnp.Numeric = 50.0,
+    gumbel_scale: chex.Numeric = 1.0,
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
     rescale_values: bool = True,
-    epsilon: jnp.Numeric = 1e-8
+    epsilon: chex.Numeric = 1e-8
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Optimized Gumbel MuZero policy for num_simulations=2 via a parallel BFS expansion.
 
