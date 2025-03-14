@@ -129,8 +129,11 @@ def gumbel_muzero_policy_bfs(
     num_simulations: int,
     *,
     invalid_actions: Optional[chex.Array] = None,
-    qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
-    gumbel_scale: chex.Numeric = 1.0
+    gumbel_scale: jnp.Numeric = 1.0,
+    value_scale: jnp.Numeric = 0.1,
+    maxvisit_init: jnp.Numeric = 50.0,
+    rescale_values: bool = True,
+    epsilon: jnp.Numeric = 1e-8
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Optimized Gumbel MuZero policy for num_simulations=2 via a parallel BFS expansion.
 
@@ -204,6 +207,7 @@ def gumbel_muzero_policy_bfs(
 
     return outputs, new_embedding
 
+  # children_outputs contains: reward, discount, value for each [B, num_actions].
   children_outputs, _ = expand_all_actions_flat(
       params,           # your parameters
       recurrent_fn,     # your recurrent function
@@ -213,37 +217,26 @@ def gumbel_muzero_policy_bfs(
       batch_size,
       num_actions
   )
-  # Now, outputs and new_embedding will have shape [B, num_actions, ...] according to your recurrent_fn outputs.
 
-  # Assume that child_outputs.value has shape [batch_size, num_actions]
-  children_values = children_outputs.value
+  # --- 4. Compute completed Q–values directly.
+  final_qvalues = qtransforms.compute_bfs_completed_qvalues(
+    children_outputs,
+    root,
+    value_scale=value_scale,
+    maxvisit_init=maxvisit_init,
+    rescale_values=rescale_values,
+    epsilon=epsilon,
+  )
 
-  # (Optionally, one could apply qtransform here. For a one-step expansion, one simple choice is to treat
-  # the child value as the “completed” Q-value. You may also combine it with root.value if desired.)
-  qvalues = children_values  # or: qvalues = qtransform(child_values) if appropriate
+  # --- 5. Score and select action.
+  score = gumbel + root.prior_logits + final_qvalues
+  selected_action = action_selection.masked_argmax(score, invalid_actions)
 
-  # --- 4. Compute a score for each action.
-  # [ted] This needs to be expanded, bcuz it doesn't consider reward
-  # With only one simulation, the “Sequential Halving” part is trivial so we just sum:
-  # score = gumbel + (root prior logits) + (completed Q-value)
-  score = gumbel + root.prior_logits + qvalues
-
-  # Mask invalid actions if provided.
-  # if invalid_actions is not None:
-  #   chex.assert_equal_shape([score, invalid_actions])
-  #   score = jnp.where(jnp.array(invalid_actions, dtype=bool), -jnp.inf, score)
-
-  # # --- 5. Select the best action.
-  # selected_action = jnp.argmax(score, axis=-1).astype(jnp.int32)
-  action = action_selection.masked_argmax(score, invalid_actions)
-
-  # For training purposes, one might compute action weights via a softmax.
-  completed_search_logits = _mask_invalid_actions(
-      root.prior_logits + qvalues, invalid_actions)
+  # Compute action weights for training.
+  completed_search_logits = _mask_invalid_actions(root.prior_logits + final_qvalues, invalid_actions)
   action_weights = jax.nn.softmax(completed_search_logits)
-
   return base.PolicyOutput(
-      action=action,
+      action=selected_action,
       action_weights=action_weights,
   )
 

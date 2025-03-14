@@ -20,6 +20,44 @@ import jax.numpy as jnp
 
 from mctx._src import tree as tree_lib
 
+def compute_bfs_completed_qvalues(
+    children_outputs,  # a pytree with fields: reward, discount, value; shape [B, num_actions]
+    root,              # a RootFnOutput (only root.value might be needed for reference)
+    value_scale: jnp.Numeric = 0.1,
+    maxvisit_init: jnp.Numeric = 50.0,
+    rescale_values: bool = True,
+    epsilon: jnp.Numeric = 1e-8,
+):
+  """
+  Computes completed Q-values for the root from a one-layer expansion.
+
+  Args:
+    children_outputs: Output of recurrent_fn for all actions, with fields:
+                      reward, discount, value. Each is [B, num_actions].
+    root: The root output. Here, root.value is available if needed.
+    value_scale: Scaling factor for the Q-values.
+    maxvisit_init: Constant used for scaling (with all actions visited once, max=1).
+    rescale_values: If True, rescale the Q-values to [0,1].
+    epsilon: Small constant to avoid division by zero in rescaling.
+
+  Returns:
+    final_qvalues: A [B, num_actions] array with the completed (and scaled) Q-values.
+  """
+  # Compute raw Q-values:
+  qvalues = children_outputs.reward + children_outputs.discount * children_outputs.value
+
+  # Optionally, rescale the Q-values to [0, 1].
+  if rescale_values:
+    min_val = jnp.min(qvalues, axis=-1, keepdims=True)
+    max_val = jnp.max(qvalues, axis=-1, keepdims=True)
+    qvalues = (qvalues - min_val) / jnp.maximum(max_val - min_val, epsilon)
+
+  # Compute scaling factor:
+  # With every action visited exactly once, max(visit_counts) == 1.
+  visit_scale = maxvisit_init + 1
+  final_qvalues = (visit_scale * value_scale) * qvalues
+  return final_qvalues
+
 
 def qtransform_by_min_max(
     tree: tree_lib.Tree,
