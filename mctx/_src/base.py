@@ -105,6 +105,7 @@ class PolicyOutput(Generic[T]):
   root_prior_logits: Optional[Any] = None
   final_qvalues: Optional[Any] = None
   final_score: Optional[Any] = None
+  search_logits: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)
