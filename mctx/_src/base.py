@@ -97,7 +97,13 @@ class PolicyOutput(Generic[T]):
   action: chex.Array
   action_weights: chex.Array
   # search_tree: tree.Tree[T]
+
+  # For BFS + related debugging
   search_tree: Optional[Any] = None
+  root_gumbel: Optional[Any] = None
+  root_prior_logits: Optional[Any] = None
+  final_qvalues: Optional[Any] = None
+  final_score: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)

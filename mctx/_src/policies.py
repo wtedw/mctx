@@ -219,6 +219,7 @@ def gumbel_muzero_policy_bfs(
   )
 
   # --- 4. Compute completed Q–values directly.
+  # final_qvalues has shape [B, num_actions]
   final_qvalues = qtransforms.compute_bfs_completed_qvalues(
     children_outputs,
     root,
@@ -238,6 +239,10 @@ def gumbel_muzero_policy_bfs(
   return base.PolicyOutput(
       action=selected_action,
       action_weights=action_weights,
+      root_gumbel=gumbel,
+      root_prior_logits=root.prior_logits,
+      final_qvalues=final_qvalues,
+      final_score=score,
   )
 
 def gumbel_muzero_policy(
