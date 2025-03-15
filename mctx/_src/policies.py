@@ -239,6 +239,7 @@ def gumbel_muzero_policy_bfs(
   return base.PolicyOutput(
       action=selected_action,
       action_weights=action_weights,
+      children_values=children_outputs.value,
       root_gumbel=gumbel,
       root_prior_logits=root.prior_logits,
       final_qvalues=final_qvalues,

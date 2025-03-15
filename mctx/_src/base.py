@@ -100,6 +100,7 @@ class PolicyOutput(Generic[T]):
 
   # For BFS + related debugging
   search_tree: Optional[Any] = None
+  children_values: Optional[Any] = None
   root_gumbel: Optional[Any] = None
   root_prior_logits: Optional[Any] = None
   final_qvalues: Optional[Any] = None
