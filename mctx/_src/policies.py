@@ -234,11 +234,13 @@ def gumbel_muzero_policy_bfs(
   selected_action = action_selection.masked_argmax(score, invalid_actions)
 
   # Compute action weights for training.
+  search_logits= root.prior_logits + final_qvalues # for debugging
   completed_search_logits = _mask_invalid_actions(root.prior_logits + final_qvalues, invalid_actions)
   action_weights = jax.nn.softmax(completed_search_logits)
   return base.PolicyOutput(
       action=selected_action,
       action_weights=action_weights,
+      search_logits=search_logits,
       children_values=children_outputs.value,
       root_gumbel=gumbel,
       root_prior_logits=root.prior_logits,
