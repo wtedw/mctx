@@ -361,10 +361,27 @@ def gumbel_muzero_policy(
       root.prior_logits + completed_qvalues, invalid_actions)
 
   action_weights = jax.nn.softmax(completed_search_logits)
+  # return base.PolicyOutput(
+  #     action=action,
+  #     action_weights=action_weights,
+  #     search_tree=search_tree)
+
+  # [bfs] for debugging
+  search_logits= root.prior_logits + completed_qvalues # for debugging
+  children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
+  children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
+
   return base.PolicyOutput(
       action=action,
       action_weights=action_weights,
-      search_tree=search_tree)
+      search_tree=search_tree,
+      search_logits=search_logits,
+      children_values=children_values,
+      root_gumbel=gumbel,
+      root_prior_logits=root.prior_logits,
+      final_qvalues=completed_qvalues,
+      final_score=to_argmax,
+  )
 
 
 def stochastic_muzero_policy(
