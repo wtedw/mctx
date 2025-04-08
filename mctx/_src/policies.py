@@ -316,7 +316,6 @@ def gumbel_muzero_policy_bfs2(
       final_score=score,
   )
 
-
 def gumbel_muzero_policy_bfs2(
   params: base.Params,
   rng_key: chex.PRNGKey,
@@ -490,40 +489,26 @@ def gumbel_muzero_policy_bfs2(
     layer1_outputs.reward + layer1_outputs.discount * layer1_backward_value
   )
   layer1_visits = layer2_visits + 1
-  # [rn47]
 
   # --- 8. Compute completed Q–values directly.
   # final_qvalues has shape [B, num_actions]
   root_qvalues = jnp.zeros((batch_size, num_actions))
-  print("[BFS2] root_qvalues.shape", root_qvalues.shape)
-  print("[BFS2] topk_idx.shape", topk_idx.shape)
-  print("[BFS2] topk_vals.shape", topk_vals.shape)
-  print("[BFS2] layer1_values.shape", layer1_values.shape)
   batch_idx = jnp.arange(batch_size)[:, None]            # shape [B, 1]
   batch_idx = jnp.tile(batch_idx, (1, top_k_first))      # shape [B, K]
-  print("[BFS2] batch_idx.shape", batch_idx.shape)
+  chex.assert_equal_shape([batch_idx, topk_idx, layer1_values]) # all [B, K]
 
   root_qvalues = root_qvalues.at[batch_idx, topk_idx].set(layer1_values)
-  # root_qvalues = root_qvalues.at[topk_idx].set(layer1_values)
   root_raw_value = root.value # [B,]
   root_prior_logits = root.prior_logits # [B, num_actions]
 
   # Right now layer1_visits is shape [B, K], but we want shape [B, A].
-  # layer1_visit_counts = jnp.sum(jax.nn.one_hot(topk_idx, num_actions) * topk_vals[:, None], axis=0)
   layer1_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
-  print("[BFS2] batch_idx.shape", batch_idx.shape)
-  print("[BFS2] topk_idx.shape", topk_idx.shape)
-  print("[BFS2] layer1_visits.shape", layer1_visits.shape)
-
   layer1_visit_counts = layer1_visit_counts.at[batch_idx, topk_idx].set(layer1_visits)
-  print("[BFS2] layer1_visit_counts.shape", layer1_visit_counts.shape)
 
+  chex.assert_rank(root_qvalues, 2) # (B, num_actions)
+  chex.assert_rank(root_raw_value, 1) # (B,)
 
-
-  print("[BFS2] >> root_qvalues.shape", root_qvalues.shape)
-  print("[BFS2] >> root_raw_value.shape", root_raw_value.shape)
-  print("[BFS2] >> root_prior_logits.shape", root_prior_logits.shape)
-  print("[BFS2] >> layer1_visit_counts.shape", layer1_visit_counts.shape)
+  chex.assert_equal_shape([root_qvalues, root_prior_logits, layer1_visit_counts])
   qtransform_fn = functools.partial(
       qtransforms.qtransform_completed_by_mix_value_bfs2,
       value_scale=value_scale,
