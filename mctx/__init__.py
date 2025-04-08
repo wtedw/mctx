@@ -28,6 +28,7 @@ from mctx._src.base import RecurrentFnOutput
 from mctx._src.base import RecurrentState
 from mctx._src.base import RootActionSelectionFn
 from mctx._src.base import RootFnOutput
+from mctx._src.policies import gumbel_muzero_policy_bfs2
 from mctx._src.policies import gumbel_muzero_policy_bfs
 from mctx._src.policies import gumbel_muzero_policy
 from mctx._src.policies import muzero_policy
