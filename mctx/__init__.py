@@ -28,6 +28,7 @@ from mctx._src.base import RecurrentFnOutput
 from mctx._src.base import RecurrentState
 from mctx._src.base import RootActionSelectionFn
 from mctx._src.base import RootFnOutput
+from mctx._src.policies import gumbel_muzero_policy_bfs3
 from mctx._src.policies import gumbel_muzero_policy_bfs2
 from mctx._src.policies import gumbel_muzero_policy_bfs
 from mctx._src.policies import gumbel_muzero_policy
@@ -57,6 +58,8 @@ __all__ = (
     "gumbel_muzero_interior_action_selection",
     "gumbel_muzero_policy",
     "gumbel_muzero_policy_bfs",
+    "gumbel_muzero_policy_bfs2",
+    "gumbel_muzero_policy_bfs3",
     "gumbel_muzero_root_action_selection",
     "muzero_action_selection",
     "muzero_policy",
