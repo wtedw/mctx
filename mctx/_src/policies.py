@@ -121,6 +121,166 @@ def muzero_policy(
       action_weights=action_weights,
       search_tree=search_tree)
 
+
+def gumbel_muzero_policy_bfs3(
+  params: base.Params,
+  rng_key: chex.PRNGKey,
+  root: base.RootFnOutput,
+  recurrent_fn: base.RecurrentFn,
+  *,
+  num_simulations: chex.Numeric = 2, # [scrap] unused, kept to keep testing easier
+  top_k_first: chex.Numeric = 2,
+  top_k_second: chex.Numeric = 4, # [scrap] unused,
+  gumbel_scale: chex.Numeric = 1.0,
+  # invalid_actions: Optional[chex.Array] = None,
+  invalid_actions: chex.Array = None,
+  # Extra BFS Q transform parameters:
+  value_scale: chex.Numeric = 0.1,
+  maxvisit_init: chex.Numeric = 50.0,
+  rescale_values: bool = True,
+  epsilon: chex.Numeric = 1e-8
+) -> base.PolicyOutput[None]:
+  """
+  Performs a 2-layer BFS:
+    1) From the root, pick top_k_first actions by root_gumbel + root_logits.
+        Expand them all in parallel.
+    2) For each of those children, pick top_k_second subactions via child_gumbel + child_logits,
+        expand each in parallel, then produce a Q-value for that child by some rule (e.g. max).
+    3) Combine that child Q with parent's reward, discount, etc. to get the BFS Q for each of the
+        top_k_first actions.
+    4) Choose the final root action by argmax of root_logits + root_gumbel + BFS Q.
+  """
+  # --- 1. Preprocess the root.
+  # Mask out any invalid actions in the root logits.
+  masked_root_logits = _mask_invalid_actions(root.prior_logits, invalid_actions)
+  root = root.replace(prior_logits=masked_root_logits)
+
+  chex.assert_rank(root.prior_logits, 2)
+  batch_size, num_actions = root.prior_logits.shape
+
+  # --- 2. Generate Gumbel noise (same shape as the logits).
+  rng_key, gumbel_rng = jax.random.split(rng_key)
+  root_gumbel = gumbel_scale * jax.random.gumbel(
+      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  # --- 2.5 Compute initial qvalues to ensure
+  # logits don't dominate exploration at root '
+  #
+  # Score = gumbel + logits + initial completed_qvalues
+  root_raw_value = root.value # [B,]
+  root_prior_logits = root.prior_logits # [B, num_actions]
+  root_init_qvalues = jnp.zeros((batch_size, num_actions))
+  root_children_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
+  qtransform_fn = functools.partial(
+      qtransforms.qtransform_completed_by_mix_value_bfs2,
+      value_scale=value_scale,
+      maxvisit_init=maxvisit_init,
+      rescale_values=rescale_values,
+      epsilon=epsilon,
+  )
+  root_init_completed_qvalues = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+      root_init_qvalues,
+      root_raw_value,
+      root.prior_logits,
+      root_children_visit_counts,
+  )
+  chex.assert_equal_shape([root_init_completed_qvalues, root_prior_logits, root_children_visit_counts])
+
+  score0 = root_gumbel + masked_root_logits + root_init_completed_qvalues
+
+  # --- 3. Pick the top_k_first from the root
+  topk_vals, topk_idx = jax.lax.top_k(score0, top_k_first)
+    # shape of topk_idx is [batch_size, top_k_first]
+
+  # --- 4. Expand each chosen action in parallel, calling recurrent_fn for every (batch, child).
+  # Flatten them out to shape [B * top_k_first] so we can do one pass:
+  BxK = batch_size * top_k_first
+  rng_keys = jax.random.split(rng_key, BxK).reshape(batch_size, top_k_first, -1)
+
+  flat_idx = topk_idx.reshape((BxK,))  # shape [B*K]
+  # For the embeddings, replicate each root embedding top_k_first times:
+  def replicate_leaf(x):
+    # x has shape [B, ...], replicate each batch item top_k_first times.
+    return jnp.repeat(x, top_k_first, axis=0)
+
+  batched_root_embedding = jax.tree_map(replicate_leaf, root.embedding)
+
+  # Now gather each action from flat_idx, pass to recurrent_fn
+  flat_actions = flat_idx  # shape [B*K]
+  flat_keys = rng_keys.reshape(BxK, rng_keys.shape[-1])
+
+  # Recurrent function => (RecurrentFnOutput, new_embed)
+  flat_outputs, flat_child_embed = recurrent_fn(
+      params, flat_keys, flat_actions, batched_root_embedding
+  )
+  # Reshape back to [B, K, ...]
+  def unflatten(x):
+    return x.reshape(batch_size, top_k_first, *x.shape[1:])
+  # child_outputs = jax.tree_map(unflatten, flat_outputs)
+  # child_embeddings = jax.tree_map(unflatten, flat_child_embed)
+  # # child_outputs.reward, child_outputs.value, child_outputs.prior_logits, child_outputs.discount
+
+
+
+
+  # --- 8. Re-compute completed Q–values at root.
+  # final_qvalues has shape [B, num_actions]
+  layer1_outputs = jax.tree_map(unflatten, flat_outputs)
+  layer1_qvalues = layer1_outputs.reward + layer1_outputs.discount * layer1_outputs.value # [B, K]
+
+  batch_idx = jnp.arange(batch_size)[:, None]            # shape [B, 1]
+  batch_idx = jnp.tile(batch_idx, (1, top_k_first))      # shape [B, K]
+  chex.assert_equal_shape([batch_idx, topk_idx, layer1_qvalues]) # all [B, K]
+
+  root_qvalues = jnp.zeros((batch_size, num_actions))
+  root_qvalues = root_qvalues.at[batch_idx, topk_idx].set(layer1_qvalues)
+  root_raw_value = root.value # [B,]
+  root_prior_logits = root.prior_logits # [B, num_actions]
+
+  # Right now layer1_visits is shape [B, K], .
+  # root children visit_counts will be [B, num_actions]
+  layer1_visits = jnp.ones((batch_size, top_k_first), dtype=jnp.int32)
+  root_children_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
+  root_children_visit_counts = root_children_visit_counts.at[batch_idx, topk_idx].set(layer1_visits)
+
+  chex.assert_rank(root_qvalues, 2) # (B, num_actions)
+  chex.assert_rank(root_raw_value, 1) # (B,)
+  chex.assert_equal_shape([root_qvalues, root_prior_logits, root_children_visit_counts])
+  qtransform_fn = functools.partial(
+      qtransforms.qtransform_completed_by_mix_value_bfs2,
+      value_scale=value_scale,
+      maxvisit_init=maxvisit_init,
+      rescale_values=rescale_values,
+      epsilon=epsilon,
+  )
+
+  final_qvalues = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+      root_qvalues,
+      root_raw_value,
+      root_prior_logits,
+      root_children_visit_counts,
+  )
+
+  # --- 9. Score and select action.
+  score = root_gumbel + root.prior_logits + final_qvalues
+  selected_action = action_selection.masked_argmax(score, invalid_actions)
+
+  # Compute action weights for training.
+  search_logits = root.prior_logits + final_qvalues # for debugging
+  completed_search_logits = _mask_invalid_actions(search_logits, invalid_actions)
+  action_weights = jax.nn.softmax(completed_search_logits)
+  return base.PolicyOutput(
+      action=selected_action,
+      action_weights=action_weights,
+      search_logits=search_logits,
+      children_values=root_qvalues,
+      root_gumbel=root_gumbel,
+      root_prior_logits=root.prior_logits,
+      final_qvalues=final_qvalues,
+      final_score=score,
+  )
+
+
 def gumbel_muzero_policy_bfs2(
   params: base.Params,
   rng_key: chex.PRNGKey,
