@@ -162,8 +162,30 @@ def gumbel_muzero_policy_bfs2(
   root_gumbel = gumbel_scale * jax.random.gumbel(
       gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
 
-  # Score = gumbel + logits
-  score0 = root_gumbel + masked_root_logits
+  # --- 2.5 Compute initial qvalues to ensure
+  # logits don't dominate exploration at root '
+  #
+  # Score = gumbel + logits + initial completed_qvalues
+  root_raw_value = root.value # [B,]
+  root_prior_logits = root.prior_logits # [B, num_actions]
+  root_init_qvalues = jnp.zeros((batch_size, num_actions))
+  root_children_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
+  qtransform_fn = functools.partial(
+      qtransforms.qtransform_completed_by_mix_value_bfs2,
+      value_scale=value_scale,
+      maxvisit_init=maxvisit_init,
+      rescale_values=rescale_values,
+      epsilon=epsilon,
+  )
+  root_init_completed_qvalues = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+      root_init_qvalues,
+      root_raw_value,
+      root.prior_logits,
+      root_children_visit_counts,
+  )
+  chex.assert_equal_shape([root_init_completed_qvalues, root_prior_logits, root_children_visit_counts])
+
+  score0 = root_gumbel + masked_root_logits + root_init_completed_qvalues
 
   # --- 3. Pick the top_k_first from the root
   topk_vals, topk_idx = jax.lax.top_k(score0, top_k_first)
@@ -295,7 +317,7 @@ def gumbel_muzero_policy_bfs2(
   )
   layer1_visits = layer2_visits + 1
 
-  # --- 8. Compute completed Q–values directly.
+  # --- 8. Re-compute completed Q–values at root.
   # final_qvalues has shape [B, num_actions]
   root_qvalues = jnp.zeros((batch_size, num_actions))
   batch_idx = jnp.arange(batch_size)[:, None]            # shape [B, 1]
