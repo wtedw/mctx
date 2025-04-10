@@ -141,12 +141,10 @@ def gumbel_muzero_policy_bfs3(
   epsilon: chex.Numeric = 1e-8
 ) -> base.PolicyOutput[None]:
   """
-  Performs a 2-layer BFS:
-    1) From the root, pick top_k_first actions by root_gumbel + root_logits.
+  Performs a 1-layer BFS:
+    1) From the root, pick top_k_first actions by root_gumbel + root_logits + root_completed_qvalues.
         Expand them all in parallel.
-    2) For each of those children, pick top_k_second subactions via child_gumbel + child_logits,
-        expand each in parallel, then produce a Q-value for that child by some rule (e.g. max).
-    3) Combine that child Q with parent's reward, discount, etc. to get the BFS Q for each of the
+    2) Combine that child Q with parent's reward, discount, etc. to get the BFS Q for each of the
         top_k_first actions.
     4) Choose the final root action by argmax of root_logits + root_gumbel + BFS Q.
   """
@@ -232,16 +230,33 @@ def gumbel_muzero_policy_bfs3(
   batch_idx = jnp.tile(batch_idx, (1, top_k_first))      # shape [B, K]
   chex.assert_equal_shape([batch_idx, topk_idx, layer1_qvalues]) # all [B, K]
 
-  root_qvalues = jnp.zeros((batch_size, num_actions))
-  root_qvalues = root_qvalues.at[batch_idx, topk_idx].set(layer1_qvalues)
+  # ### [original]
+  # root_qvalues = jnp.zeros((batch_size, num_actions))
+  # root_qvalues = root_qvalues.at[batch_idx, topk_idx].set(layer1_qvalues)
+
+  ### [optimized] Trick to avoid scatter op
+  #  One-hot mask for [B, num_actions]
+  #  Multiply each one-hot with its corresponding q-value
+  mask_q = jax.nn.one_hot(topk_idx, num_actions)  # [B, K, A]
+  root_qvalues = jnp.sum(mask_q * layer1_qvalues[:, :, None], axis=1)  # [B, A]
+
   root_raw_value = root.value # [B,]
   root_prior_logits = root.prior_logits # [B, num_actions]
+
 
   # Right now layer1_visits is shape [B, K], .
   # root children visit_counts will be [B, num_actions]
   layer1_visits = jnp.ones((batch_size, top_k_first), dtype=jnp.int32)
-  root_children_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
-  root_children_visit_counts = root_children_visit_counts.at[batch_idx, topk_idx].set(layer1_visits)
+
+  # ### [original]
+  # root_children_visit_counts = jnp.zeros((batch_size, num_actions), dtype=jnp.int32)
+  # root_children_visit_counts = root_children_visit_counts.at[batch_idx, topk_idx].set(layer1_visits)
+
+  ### [optimized]
+  mask_v = jax.nn.one_hot(topk_idx, num_actions, dtype=jnp.int32)  # [B, K, A]
+  root_children_visit_counts = jnp.sum(mask_v * layer1_visits[:, :, None], axis=1)  # [B, A]
+
+
 
   chex.assert_rank(root_qvalues, 2) # (B, num_actions)
   chex.assert_rank(root_raw_value, 1) # (B,)
