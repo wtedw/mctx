@@ -109,6 +109,7 @@ class PolicyOutput(Generic[T]):
 
   # For BFS2 debugging
   rescaled_qvalues: Optional[Any] = None
+  rescaled_qvalues2: Optional[Any] = None
   visit_counts: Optional[Any] = None
 
 
