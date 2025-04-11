@@ -33,7 +33,7 @@ def qtransform_completed_by_mix_value_bfs2(
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
 # ) -> chex.Array:
-) -> Tuple[chex.Array, chex.Array]: # [debug]
+) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]: # [debug]
   """Returns completed qvalues.
 
   The missing Q-values of the unvisited actions are replaced by the
@@ -71,12 +71,19 @@ def qtransform_completed_by_mix_value_bfs2(
   # raw_value = tree.raw_values[node_index]
   # prior_probs = jax.nn.softmax(
   #     tree.children_prior_logits[node_index])
+  mixed_value = _compute_mixed_value(
+      raw_value,
+      qvalues=qvalues,
+      visit_counts=visit_counts,
+      prior_probs=prior_probs)
   if use_mixed_value:
-    value = _compute_mixed_value(
-        raw_value,
-        qvalues=qvalues,
-        visit_counts=visit_counts,
-        prior_probs=prior_probs)
+
+    value = mixed_value
+    # value = _compute_mixed_value(
+    #     raw_value,
+    #     qvalues=qvalues,
+    #     visit_counts=visit_counts,
+    #     prior_probs=prior_probs)
   else:
     value = raw_value
   completed_qvalues = _complete_qvalues(
@@ -91,7 +98,7 @@ def qtransform_completed_by_mix_value_bfs2(
   visit_scale = maxvisit_init + maxvisit
 
   original_res = visit_scale * value_scale * completed_qvalues
-  return (rescaled_qvalues, original_res)
+  return (raw_value, mixed_value, maxvisit, rescaled_qvalues, original_res)
   # return visit_scale * value_scale * completed_qvalues
 
 def compute_bfs_completed_qvalues(
