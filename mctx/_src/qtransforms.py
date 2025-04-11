@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from mctx._src import tree as tree_lib
-
+from typing import Tuple
 
 def qtransform_completed_by_mix_value_bfs2(
     root_qvalues,
@@ -32,7 +32,8 @@ def qtransform_completed_by_mix_value_bfs2(
     rescale_values: bool = True,
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
-) -> chex.Array:
+# ) -> chex.Array:
+) -> Tuple[chex.Array, chex.Array]: # [debug]
   """Returns completed qvalues.
 
   The missing Q-values of the unvisited actions are replaced by the
@@ -82,11 +83,16 @@ def qtransform_completed_by_mix_value_bfs2(
       qvalues, visit_counts=visit_counts, value=value)
 
   # Scaling the Q-values.
+  rescaled_qvalues = _rescale_qvalues(completed_qvalues, epsilon) # [debug]
   if rescale_values:
-    completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
+    # completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
+    completed_qvalues = rescaled_qvalues # [debug]
   maxvisit = jnp.max(visit_counts, axis=-1)
   visit_scale = maxvisit_init + maxvisit
-  return visit_scale * value_scale * completed_qvalues
+
+  original_res = visit_scale * value_scale * completed_qvalues
+  return (rescaled_qvalues, original_res)
+  # return visit_scale * value_scale * completed_qvalues
 
 def compute_bfs_completed_qvalues(
     children_outputs,  # a pytree with fields: reward, discount, value; shape [B, num_actions]

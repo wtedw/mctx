@@ -107,6 +107,10 @@ class PolicyOutput(Generic[T]):
   final_score: Optional[Any] = None
   search_logits: Optional[Any] = None
 
+  # For BFS2 debugging
+  rescaled_qvalues: Optional[Any] = None
+  visit_counts: Optional[Any] = None
+
 
 @chex.dataclass(frozen=True)
 class DecisionRecurrentFnOutput:
