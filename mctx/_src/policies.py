@@ -355,7 +355,7 @@ def gumbel_muzero_policy_bfs2(
       rescale_values=rescale_values,
       epsilon=epsilon,
   )
-  root_init_completed_qvalues = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+  rescaled_qvalues, root_init_completed_qvalues = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
       root_init_qvalues,
       root_raw_value,
       root.prior_logits,
@@ -546,6 +546,8 @@ def gumbel_muzero_policy_bfs2(
       root_prior_logits=root.prior_logits,
       final_qvalues=final_qvalues,
       final_score=score,
+      rescaled_qvalues=rescaled_qvalues,
+      visit_counts=layer1_visit_counts,
   )
 
 def gumbel_muzero_policy_bfs(
