@@ -167,7 +167,7 @@ def gumbel_muzero_policy_bfs3(
                         axis=-1, keepdims=True)
   logit_span = jnp.maximum(valid_max - valid_min, 1.0)
 
-  root_gumbel = 0.3 * logit_span * jax.random.gumbel(
+  root_gumbel = gumbel_scale * logit_span * jax.random.gumbel(
                   gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
 
   # --- 2.5 Compute initial qvalues to ensure
