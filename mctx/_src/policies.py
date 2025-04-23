@@ -158,8 +158,17 @@ def gumbel_muzero_policy_bfs3(
 
   # --- 2. Generate Gumbel noise (same shape as the logits).
   rng_key, gumbel_rng = jax.random.split(rng_key)
-  root_gumbel = gumbel_scale * jax.random.gumbel(
-      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+  # root_gumbel = gumbel_scale * jax.random.gumbel(
+  #     gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  valid_max   = jnp.max(jnp.where(invalid_actions, -jnp.inf, masked_root_logits),
+                        axis=-1, keepdims=True)
+  valid_min   = jnp.min(jnp.where(invalid_actions, jnp.inf, masked_root_logits),
+                        axis=-1, keepdims=True)
+  logit_span = jnp.maximum(valid_max - valid_min, 1.0)
+
+  root_gumbel = 0.3 * logit_span * jax.random.gumbel(
+                  gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
 
   # --- 2.5 Compute initial qvalues to ensure
   # logits don't dominate exploration at root '
@@ -571,7 +580,8 @@ def gumbel_muzero_policy_bfs(
     rescale_values: bool = True,
     epsilon: chex.Numeric = 1e-8
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
-  """Optimized Gumbel MuZero policy for num_simulations=2 via a parallel BFS expansion.
+  """Optimized Gumbel MuZero policy that expands a 1 layer BFS expansion
+  by visiting all possible actions + masking.
 
   This version assumes only one “expansion” level is needed, so that all actions from the
   root are expanded in parallel. This eliminates loops and is TPU‐friendly.
