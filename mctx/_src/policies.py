@@ -196,8 +196,13 @@ def gumbel_muzero_policy_bfs3(
   score0 = root_gumbel + masked_root_logits + root_init_completed_qvalues
 
   # --- 3. Pick the top_k_first from the root
+  # shape of topk_idx is [batch_size, top_k_first]
   topk_vals, topk_idx = jax.lax.top_k(score0, top_k_first)
-    # shape of topk_idx is [batch_size, top_k_first]
+  candidate_mask = jnp.any(
+      jax.nn.one_hot(topk_idx, num_actions, dtype=bool), axis=1
+  )                           # bool[B, A] – True on candidate actions
+
+
 
   # --- 4. Expand each chosen action in parallel, calling recurrent_fn for every (batch, child).
   # Flatten them out to shape [B * top_k_first] so we can do one pass:
@@ -287,7 +292,13 @@ def gumbel_muzero_policy_bfs3(
 
   # --- 9. Score and select action.
   score = root_gumbel + root.prior_logits + final_qvalues
-  selected_action = action_selection.masked_argmax(score, invalid_actions)
+
+  # Union the original invalid mask with the “not-candidate” mask
+  combined_invalid = jnp.logical_or(invalid_actions,
+                                    jnp.logical_not(candidate_mask))
+
+  selected_action = action_selection.masked_argmax(score, combined_invalid)
+
 
   # Compute action weights for training.
   search_logits = root.prior_logits + final_qvalues # for debugging
