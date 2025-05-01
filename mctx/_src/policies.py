@@ -122,6 +122,158 @@ def muzero_policy(
       search_tree=search_tree)
 
 
+def gumbel_muzero_policy_sh2(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    *,
+    num_simulations: chex.Numeric = 2, # [scrap] unused, kept to keep testing easier
+    top_k_first: int = 16,      # first SH rung
+    top_k_second: int = 8,      # second SH rung (top_k_first // 2)
+    gumbel_scale: chex.Numeric = 1.0,
+    invalid_actions: Optional[chex.Array] = None,
+    # Completed-Q scaling (same knobs you already expose)
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
+    rescale_values: bool = True,
+    epsilon: chex.Numeric = 1e-8,
+) -> base.PolicyOutput[None]:
+  """
+  Sequential-Halving BFS (2 rungs).
+  1.  Visit `top_k_first` (=16) root actions once in parallel.
+  2.  Keep the best half (8), visit *one* child of each of those once.
+  3.  Back-up the two visits and pick the root move that maximises
+      gumbel + prior + completed-Q.
+  Every expansion is batched → friendly to TPU/GPU.
+  """
+
+  # ------------------------------------------------------------------------
+  # 0) Root pre-processing
+  # ------------------------------------------------------------------------
+  root = root.replace(
+      prior_logits=_mask_invalid_actions(root.prior_logits, invalid_actions))
+  B, A = root.prior_logits.shape
+  rng_key, g_root_key = jax.random.split(rng_key)
+  root_gumbel = gumbel_scale * jax.random.gumbel(
+      g_root_key, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  # ------------------------------------------------------------------------
+  # 1) FIRST RUNG  –– expand 16 distinct root actions once
+  # ------------------------------------------------------------------------
+  #    score = g + logit  (initial completed-Q is 0 so it drops out)
+  first_score = root_gumbel + root.prior_logits
+  _, first_idx = jax.lax.top_k(first_score, top_k_first)     # [B, 16]
+
+  # Expand them in parallel -------------------------------------------------
+  Bx16 = B * top_k_first
+  flat_actions = first_idx.reshape(-1)
+  flat_keys    = jax.random.split(rng_key, Bx16).reshape(Bx16, -1)
+  flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, 0),
+                              root.embedding)
+
+  flat_out, flat_child_emb = recurrent_fn(params, flat_keys, flat_actions,
+                                          flat_embed)
+
+  def unflat(x):                                          # helper unchanged
+      return x.reshape(B, top_k_first, *x.shape[1:])
+
+  layer1_out     = jax.tree_map(unflat, flat_out)         # <-- rename
+  layer1_embeds  = jax.tree_map(unflat, flat_child_emb)   # <-- NEW
+  q1             = layer1_out.reward + layer1_out.discount * layer1_out.value
+  vcnt1  = jnp.ones_like(q1, dtype=jnp.int32)                      # visits = 1
+
+  # ------------------------------------------------------------------------
+  # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
+  # ------------------------------------------------------------------------
+  # score_after_1 = g   + logit   + q1
+  score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
+           + jnp.take_along_axis(root.prior_logits, first_idx, -1) + q1
+  _, second_loc = jax.lax.top_k(score1, top_k_second)              # [B, 8]
+  second_idx = jnp.take_along_axis(first_idx, second_loc, -1)      # [B, 8]
+
+  # Expand *one child* of each of those 8 parents --------------------------
+  # Gather the chosen parents’ logits so we can pick a child
+  child_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
+                                     second_loc[..., None], 1)      # -> [B,8,A]
+
+  rng_key, g_child_key = jax.random.split(rng_key)
+  child_gumbel = gumbel_scale * jax.random.gumbel(
+      g_child_key, shape=child_logits.shape, dtype=child_logits.dtype)
+  child_score  = child_logits + child_gumbel
+  best_child   = jnp.argmax(child_score, axis=-1).astype(jnp.int32) # [B,8]
+
+  # Flatten and expand those leaf actions
+  Bx8   = B * top_k_second
+  leaf_actions = best_child.reshape(-1)
+  leaf_keys    = jax.random.split(rng_key, Bx8).reshape(Bx8, -1)
+
+  def gather_parents_leaf(x):
+      picked = jnp.take(x, second_loc, axis=1)   # [B, 8, …]
+      return picked.reshape(Bx8, *x.shape[2:])
+
+  parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+
+  flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, parent_emb_flat)
+  def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
+  layer2 = jax.tree_map(unflat2, flat2_out)
+
+  # Leaf Q = r1 + γ1 * (r2 + γ2 * v2) -------------------------------
+  q2_leaf = layer2.reward + layer2.discount * layer2.value          # [B,8]
+  r1      = jnp.take_along_axis(layer1_out.reward, second_loc, 1)       # [B,8]
+  γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)     # [B,8]
+  q2      = r1 + γ1 * q2_leaf                                       # [B,8]
+
+  # Combine two visits  -> mean value per parent --------------------
+  q_comb  = (jnp.take_along_axis(q1, second_loc, 1) + q2) / 2.0
+  vcnt2   = jnp.full_like(q_comb, 2, dtype=jnp.int32)               # visits = 2
+
+  # ------------------------------------------------------------------------
+  # 3) Assemble per-action arrays for the root (q & visit-count)
+  # ------------------------------------------------------------------------
+  q_root   = jnp.zeros((B, A));   visit_root = jnp.zeros((B, A), jnp.int32)
+  batch_r  = jnp.arange(B)[:, None]
+
+  # fill round-1 (16 arms, 1 visit each) -----------------------------
+  q_root   = q_root.at[batch_r, first_idx].set(q1)
+  visit_root = visit_root.at[batch_r, first_idx].set(vcnt1)
+
+  # overwrite the 8 survivors with the averaged value / 2 visits ----
+  q_root   = q_root.at[batch_r, second_idx].set(q_comb)
+  visit_root = visit_root.at[batch_r, second_idx].set(vcnt2)
+
+  # ------------------------------------------------------------------------
+  # 4) Completed-Q transform & final root decision
+  # ------------------------------------------------------------------------
+  qtransform_fn = functools.partial(
+      qtransforms.qtransform_completed_by_mix_value_bfs2,
+      value_scale=value_scale,
+      maxvisit_init=maxvisit_init,
+      rescale_values=rescale_values,
+      epsilon=epsilon)
+
+  _, _, _, _, completed_q = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+      q_root, root.value, root.prior_logits, visit_root)
+
+  final_score = root_gumbel + root.prior_logits + completed_q
+  best_a = action_selection.masked_argmax(final_score, invalid_actions)
+
+  # Soft-label policy targets ---------------------------------------
+  search_logits = _mask_invalid_actions(root.prior_logits + completed_q,
+                                        invalid_actions)
+  action_weights = jax.nn.softmax(search_logits)
+
+  return base.PolicyOutput(
+      action         = best_a,
+      action_weights = action_weights,
+      # optional extra diagnostics
+      children_values = q_root,
+      root_gumbel     = root_gumbel,
+      final_qvalues   = completed_q,
+      final_score     = final_score,
+      visit_counts    = visit_root,
+  )
+
 def gumbel_muzero_policy_bfs3(
   params: base.Params,
   rng_key: chex.PRNGKey,
