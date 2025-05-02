@@ -165,23 +165,44 @@ def gumbel_muzero_policy_sh2(
   first_score = root_gumbel + root.prior_logits
   _, first_idx = jax.lax.top_k(first_score, top_k_first)     # [B, 16]
 
-  # Expand them in parallel -------------------------------------------------
+  # Expand root in parallel -------------------------------------------------
   Bx16 = B * top_k_first
-  flat_actions = first_idx.reshape(-1)
-  flat_keys    = jax.random.split(rng_key, Bx16).reshape(Bx16, -1)
-  flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, 0),
+  root_flat_actions = first_idx.reshape(-1)
+  root_flat_keys    = jax.random.split(rng_key, Bx16).reshape(Bx16, -1)
+  root_flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, axis=0),
                               root.embedding)
 
-  flat_out, flat_child_emb = recurrent_fn(params, flat_keys, flat_actions,
-                                          flat_embed)
+  layer1_flat_out, layer1_flat_emb = recurrent_fn(params, root_flat_keys, root_flat_actions,
+                                          root_flat_embed)
 
   def unflat(x):                                          # helper unchanged
       return x.reshape(B, top_k_first, *x.shape[1:])
 
-  layer1_out     = jax.tree_map(unflat, flat_out)         # <-- rename
-  layer1_embeds  = jax.tree_map(unflat, flat_child_emb)   # <-- NEW
+  layer1_out     = jax.tree_map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
+  layer1_embeds  = jax.tree_map(unflat, layer1_flat_emb)
   q1             = layer1_out.reward + layer1_out.discount * layer1_out.value
   vcnt1  = jnp.ones_like(q1, dtype=jnp.int32)                      # visits = 1
+
+  # [bug] If num_valid_actions < top_k_first (can calculate from invalid_actions)
+  # Then we will calculate try to calculate qvalues for them
+  # (calling with invalid actions will provide -1 rewards)
+  # we need to mask them out, and make sure visits doesn't consider them either
+  # ------------------------------------------------------------------
+  # 1-bis)  Mask out actions that are invalid at the root
+  # ------------------------------------------------------------------
+  if invalid_actions is not None:
+      # valid_mask : 1 for legal actions, 0 for invalid
+      valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
+
+      q1     = q1     * valid_mask
+      vcnt1  = vcnt1  * valid_mask.astype(q1.dtype)        # visits = 0 for invalid
+
+      # actions that are invalid should never survive to rung-2
+      # set their score to −inf so top_k ignores them
+      score1_mask = (valid_mask == 0)
+  else:
+      score1_mask = jnp.zeros_like(q1, dtype=bool)
+
 
   # ------------------------------------------------------------------------
   # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
@@ -189,19 +210,23 @@ def gumbel_muzero_policy_sh2(
   # score_after_1 = g   + logit   + q1
   score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
            + jnp.take_along_axis(root.prior_logits, first_idx, -1) + q1
-  _, second_loc = jax.lax.top_k(score1, top_k_second)              # [B, 8]
+  masked_score1 = jnp.where(score1_mask, -jnp.inf, score1)
+  _, second_loc = jax.lax.top_k(masked_score1, top_k_second)       # [B, 8]
   second_idx = jnp.take_along_axis(first_idx, second_loc, -1)      # [B, 8]
 
-  # Expand *one child* of each of those 8 parents --------------------------
+  # Expand *one child* of each of those 8 parents in layer 1 --------------------------
   # Gather the chosen parents’ logits so we can pick a child
-  child_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
+  layer1_halved_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
                                      second_loc[..., None], 1)      # -> [B,8,A]
 
-  rng_key, g_child_key = jax.random.split(rng_key)
-  child_gumbel = gumbel_scale * jax.random.gumbel(
-      g_child_key, shape=child_logits.shape, dtype=child_logits.dtype)
-  child_score  = child_logits + child_gumbel
-  best_child   = jnp.argmax(child_score, axis=-1).astype(jnp.int32) # [B,8]
+  # completed-Q values for each of the 8 parents (all children unvisited → 0)
+  layer1_halved_completed_q = jnp.zeros_like(layer1_halved_logits)
+
+  # Apply the interior selection heuristic once, batched over [B,8]
+  probs       = jax.nn.softmax(layer1_halved_logits + layer1_halved_completed_q, axis=-1)
+  visit_dummy = jnp.zeros_like(layer1_halved_logits, dtype=jnp.int32)
+  to_argmax   = probs                                      # since visits=0
+  best_child  = jnp.argmax(to_argmax, axis=-1).astype(jnp.int32)   # [B,8]
 
   # Flatten and expand those leaf actions
   Bx8   = B * top_k_second
@@ -213,6 +238,10 @@ def gumbel_muzero_policy_sh2(
       return picked.reshape(Bx8, *x.shape[2:])
 
   parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+
+
+  # The previous line expects `layer1.embedding` if you stored it;
+  # if not, pull it out of recurrent_fn return.
 
   flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, parent_emb_flat)
   def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
