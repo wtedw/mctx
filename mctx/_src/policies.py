@@ -180,8 +180,8 @@ def gumbel_muzero_policy_sh2(
 
   layer1_out     = jax.tree_map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
   layer1_embeds  = jax.tree_map(unflat, layer1_flat_emb)
-  q1             = layer1_out.reward + layer1_out.discount * layer1_out.value
-  vcnt1  = jnp.ones_like(q1, dtype=jnp.int32)                      # visits = 1
+  layer1_qvalues = layer1_out.reward + layer1_out.discount * layer1_out.value
+  layer1_visits  = jnp.ones_like(layer1_qvalues, dtype=jnp.int32) # visits = 1
 
   # [bug] If num_valid_actions < top_k_first (can calculate from invalid_actions)
   # Then we will calculate try to calculate qvalues for them
@@ -192,27 +192,46 @@ def gumbel_muzero_policy_sh2(
   # ------------------------------------------------------------------
   if invalid_actions is not None:
       # valid_mask : 1 for legal actions, 0 for invalid
-      valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
+      layer1_valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
 
-      q1     = q1     * valid_mask
-      vcnt1  = vcnt1  * valid_mask.astype(q1.dtype)        # visits = 0 for invalid
+      layer1_qvalues = layer1_qvalues * layer1_valid_mask
+      layer1_visits = layer1_visits * layer1_valid_mask.astype(layer1_qvalues.dtype)        # visits = 0 for invalid
 
       # actions that are invalid should never survive to rung-2
       # set their score to −inf so top_k ignores them
-      score1_mask = (valid_mask == 0)
+      layer1_score_mask = (layer1_valid_mask == 0)
   else:
-      score1_mask = jnp.zeros_like(q1, dtype=bool)
+      layer1_score_mask = jnp.zeros_like(layer1_qvalues, dtype=bool)
 
+  # 1-fin) Calc the completed_qvalues
+
+  def layer1_qtransform(q1):
+    alpha = value_scale * (maxvisit_init + 1.0)        # same scale as paper
+    if rescale_values:
+        q_min  = jnp.min(q1, axis=1, keepdims=True)
+        q_max  = jnp.max(q1, axis=1, keepdims=True)
+        q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
+    else:
+        q_norm = q1                      # no rescaling
+    cq = alpha * q_norm                # completed-Q for the 16 parents
+    return cq
+
+  # If we visit and the value is negative, we should pick that over invalid action
+  # This will happen when we do top_k with masked_score
+  layer1_cqvalues = layer1_qtransform(layer1_qvalues)
 
   # ------------------------------------------------------------------------
   # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
   # ------------------------------------------------------------------------
   # score_after_1 = g   + logit   + q1
   score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
-           + jnp.take_along_axis(root.prior_logits, first_idx, -1) + q1
-  masked_score1 = jnp.where(score1_mask, -jnp.inf, score1)
-  _, second_loc = jax.lax.top_k(masked_score1, top_k_second)       # [B, 8]
+           + jnp.take_along_axis(root.prior_logits, first_idx, -1) + layer1_cqvalues
+  masked_score1 = jnp.where(layer1_score_mask, -jnp.inf, score1)
+  _, second_loc = jax.lax.top_k(masked_score1, top_k_second)       # [B, 8] the idx within the 16
   second_idx = jnp.take_along_axis(first_idx, second_loc, -1)      # [B, 8]
+
+  # 2‑b) which of those 8 parents were illegal to begin with? --------------
+  illegal_parent = jnp.take_along_axis(layer1_score_mask, second_loc, 1)  # [B,8] Bool
 
   # Expand *one child* of each of those 8 parents in layer 1 --------------------------
   # Gather the chosen parents’ logits so we can pick a child
@@ -237,25 +256,44 @@ def gumbel_muzero_policy_sh2(
       picked = jnp.take(x, second_loc, axis=1)   # [B, 8, …]
       return picked.reshape(Bx8, *x.shape[2:])
 
-  parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+  # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+  layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
 
 
   # The previous line expects `layer1.embedding` if you stored it;
   # if not, pull it out of recurrent_fn return.
 
-  flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, parent_emb_flat)
+  flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, layer2_parent_emb_flat) # [Bx8]
   def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
-  layer2 = jax.tree_map(unflat2, flat2_out)
+  layer2 = jax.tree_map(unflat2, flat2_out) # [B, 8]
 
+  ##### [old]
   # Leaf Q = r1 + γ1 * (r2 + γ2 * v2) -------------------------------
-  q2_leaf = layer2.reward + layer2.discount * layer2.value          # [B,8]
-  r1      = jnp.take_along_axis(layer1_out.reward, second_loc, 1)       # [B,8]
-  γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)     # [B,8]
-  q2      = r1 + γ1 * q2_leaf                                       # [B,8]
+  # q2_leaf = layer2.reward + layer2.discount * layer2.value          # [B,8]
+  # r1      = jnp.take_along_axis(layer1_out.reward, second_loc, 1)       # [B,8]
+  # γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)     # [B,8]
+  # layer2_qvalues = r1 + γ1 * q2_leaf                                       # [B,8]
 
-  # Combine two visits  -> mean value per parent --------------------
-  q_comb  = (jnp.take_along_axis(q1, second_loc, 1) + q2) / 2.0
-  vcnt2   = jnp.full_like(q_comb, 2, dtype=jnp.int32)               # visits = 2
+  # # Combine two visits  -> mean value per parent --------------------
+  # q_comb  = (jnp.take_along_axis(layer1_qvalues, second_loc, 1) + layer2_qvalues) / 2.0
+  # vcnt2   = jnp.full_like(q_comb, 2, dtype=jnp.int32)               # [B, 8], visits = 2
+
+  ##### new
+  # 2‑e) compute q₂ only for *legal* parents --------------------------------
+  q2_leaf = layer2.reward + layer2.discount * layer2.value                  # [B,8]
+  r1      = jnp.take_along_axis(layer1_out.reward,   second_loc, 1)
+  γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)
+  q2_full = r1 + γ1 * q2_leaf                                               # [B,8]
+
+  # mask‑out the illegal parents: keep their original q₁, no extra visit
+  q1_sel  = jnp.take_along_axis(layer1_qvalues, second_loc, 1)              # [B,8]
+  v1_sel  = jnp.take_along_axis(layer1_visits,  second_loc, 1)              # [B,8]
+
+  q2      = jnp.where(illegal_parent, 0.0, q2_full)                         # [B,8]
+  v2      = jnp.where(illegal_parent, 0,   1).astype(jnp.int32)             # [B,8]
+
+  q_comb  = (q1_sel * v1_sel + q2) / (v1_sel + v2 + 1e-6)                   # [B,8]
+  vcnt2   = v1_sel + v2                                                     # [B,8]
 
   # ------------------------------------------------------------------------
   # 3) Assemble per-action arrays for the root (q & visit-count)
@@ -264,12 +302,14 @@ def gumbel_muzero_policy_sh2(
   batch_r  = jnp.arange(B)[:, None]
 
   # fill round-1 (16 arms, 1 visit each) -----------------------------
-  q_root   = q_root.at[batch_r, first_idx].set(q1)
-  visit_root = visit_root.at[batch_r, first_idx].set(vcnt1)
+  q_root   = q_root.at[batch_r, first_idx].set(layer1_qvalues)
+  visit_root = visit_root.at[batch_r, first_idx].set(layer1_visits)
 
   # overwrite the 8 survivors with the averaged value / 2 visits ----
   q_root   = q_root.at[batch_r, second_idx].set(q_comb)
   visit_root = visit_root.at[batch_r, second_idx].set(vcnt2)
+
+  jax.debug.print("FinSH2+ß\nq_root: {}\nvisit_root: {}", q_root, visit_root)
 
   # ------------------------------------------------------------------------
   # 4) Completed-Q transform & final root decision
