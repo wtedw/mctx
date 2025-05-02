@@ -133,7 +133,7 @@ def gumbel_muzero_policy_sh2(
     top_k_second: int = 8,      # second SH rung (top_k_first // 2)
     gumbel_scale: chex.Numeric = 1.0,
     invalid_actions: Optional[chex.Array] = None,
-    # Completed-Q scaling (same knobs you already expose)
+    # Completed-Q scaling
     value_scale: chex.Numeric = 0.1,
     maxvisit_init: chex.Numeric = 50.0,
     rescale_values: bool = True,
@@ -168,7 +168,9 @@ def gumbel_muzero_policy_sh2(
   # Expand root in parallel -------------------------------------------------
   Bx16 = B * top_k_first
   root_flat_actions = first_idx.reshape(-1)
-  root_flat_keys    = jax.random.split(rng_key, Bx16).reshape(Bx16, -1)
+
+  rng_key, _rng = jax.random.split(rng_key)
+  root_flat_keys    = jax.random.split(_rng, Bx16).reshape(Bx16, -1)
   root_flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, axis=0),
                               root.embedding)
 
@@ -183,10 +185,6 @@ def gumbel_muzero_policy_sh2(
   layer1_qvalues = layer1_out.reward + layer1_out.discount * layer1_out.value
   layer1_visits  = jnp.ones_like(layer1_qvalues, dtype=jnp.int32) # visits = 1
 
-  # [bug] If num_valid_actions < top_k_first (can calculate from invalid_actions)
-  # Then we will calculate try to calculate qvalues for them
-  # (calling with invalid actions will provide -1 rewards)
-  # we need to mask them out, and make sure visits doesn't consider them either
   # ------------------------------------------------------------------
   # 1-bis)  Mask out actions that are invalid at the root
   # ------------------------------------------------------------------
@@ -195,7 +193,7 @@ def gumbel_muzero_policy_sh2(
       layer1_valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
 
       layer1_qvalues = layer1_qvalues * layer1_valid_mask
-      layer1_visits = layer1_visits * layer1_valid_mask.astype(layer1_qvalues.dtype)        # visits = 0 for invalid
+      layer1_visits = layer1_visits * layer1_valid_mask.astype(layer1_qvalues.dtype) # visits = 0 for invalid
 
       # actions that are invalid should never survive to rung-2
       # set their score to −inf so top_k ignores them
@@ -243,42 +241,47 @@ def gumbel_muzero_policy_sh2(
 
   # Apply the interior selection heuristic once, batched over [B,8]
   probs       = jax.nn.softmax(layer1_halved_logits + layer1_halved_completed_q, axis=-1)
-  visit_dummy = jnp.zeros_like(layer1_halved_logits, dtype=jnp.int32)
   to_argmax   = probs                                      # since visits=0
   best_child  = jnp.argmax(to_argmax, axis=-1).astype(jnp.int32)   # [B,8]
 
   # Flatten and expand those leaf actions
   Bx8   = B * top_k_second
   leaf_actions = best_child.reshape(-1)
-  leaf_keys    = jax.random.split(rng_key, Bx8).reshape(Bx8, -1)
 
-  def gather_parents_leaf(x):
-      picked = jnp.take(x, second_loc, axis=1)   # [B, 8, …]
-      return picked.reshape(Bx8, *x.shape[2:])
+  rng_key, key_leaf = jax.random.split(rng_key)
+  leaf_keys = jax.random.split(key_leaf, Bx8).reshape(Bx8, -1)
+
+  # def gather_parents_leaf(x):
+  #     picked = jnp.take(x, second_loc, axis=1)   # [B, 8, …]
+  #     return picked.reshape(Bx8, *x.shape[2:])
+
+  # def gather_parents_leaf(x):
+  #   # x : [B, 16, …]
+  #   picked = jnp.take_along_axis(
+  #       x,                      # [B, 16, …]
+  #       second_loc[..., None],  # [B,  8, 1] – broadcast to trailing dims
+  #       axis=1)                 # gather along the “16’’ axis
+  #   return picked.reshape(Bx8, *x.shape[2:])   # [B*8, …]
+
+  def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
+    """Pick the 8 survivors from the 16 parents and flatten to [B*8, …]."""
+    # Build an index tensor with the **same rank** as `x`.
+    if x.ndim == 2:                       # [B, 16]
+        idx = second_loc                  # [B, 8]
+    else:                                 # [B, 16, …]
+        extra = (None,) * (x.ndim - 2)    # e.g. (None,) or (None,None)
+        idx   = second_loc[..., *extra]   # [B, 8, 1, 1, …]
+
+    picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
+    return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
 
   # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
   layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
-
-
-  # The previous line expects `layer1.embedding` if you stored it;
-  # if not, pull it out of recurrent_fn return.
 
   flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, layer2_parent_emb_flat) # [Bx8]
   def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
   layer2 = jax.tree_map(unflat2, flat2_out) # [B, 8]
 
-  ##### [old]
-  # Leaf Q = r1 + γ1 * (r2 + γ2 * v2) -------------------------------
-  # q2_leaf = layer2.reward + layer2.discount * layer2.value          # [B,8]
-  # r1      = jnp.take_along_axis(layer1_out.reward, second_loc, 1)       # [B,8]
-  # γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)     # [B,8]
-  # layer2_qvalues = r1 + γ1 * q2_leaf                                       # [B,8]
-
-  # # Combine two visits  -> mean value per parent --------------------
-  # q_comb  = (jnp.take_along_axis(layer1_qvalues, second_loc, 1) + layer2_qvalues) / 2.0
-  # vcnt2   = jnp.full_like(q_comb, 2, dtype=jnp.int32)               # [B, 8], visits = 2
-
-  ##### new
   # 2‑e) compute q₂ only for *legal* parents --------------------------------
   q2_leaf = layer2.reward + layer2.discount * layer2.value                  # [B,8]
   r1      = jnp.take_along_axis(layer1_out.reward,   second_loc, 1)
@@ -309,7 +312,7 @@ def gumbel_muzero_policy_sh2(
   q_root   = q_root.at[batch_r, second_idx].set(q_comb)
   visit_root = visit_root.at[batch_r, second_idx].set(vcnt2)
 
-  jax.debug.print("FinSH2+ß\nq_root: {}\nvisit_root: {}", q_root, visit_root)
+  # jax.debug.print("FinSH2+ß\nq_root: {}\nvisit_root: {}", q_root, visit_root)
 
   # ------------------------------------------------------------------------
   # 4) Completed-Q transform & final root decision
@@ -321,8 +324,10 @@ def gumbel_muzero_policy_sh2(
       rescale_values=rescale_values,
       epsilon=epsilon)
 
-  _, _, _, _, completed_q = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+  (raw_value, mixed_value, maxvisit, rescaled_q, completed_q) = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
       q_root, root.value, root.prior_logits, visit_root)
+  # _, _, _, _, completed_q = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+  #     q_root, root.value, root.prior_logits, visit_root)
 
   final_score = root_gumbel + root.prior_logits + completed_q
   best_a = action_selection.masked_argmax(final_score, invalid_actions)
@@ -332,15 +337,41 @@ def gumbel_muzero_policy_sh2(
                                         invalid_actions)
   action_weights = jax.nn.softmax(search_logits)
 
+  # return base.PolicyOutput(
+  #     action         = best_a,
+  #     action_weights = action_weights,
+  #     # optional extra diagnostics
+  #     children_values = q_root,
+  #     root_gumbel     = root_gumbel,
+  #     final_qvalues   = completed_q,
+  #     final_score     = final_score,
+  #     visit_counts    = visit_root,
+  # )
+
   return base.PolicyOutput(
-      action         = best_a,
-      action_weights = action_weights,
-      # optional extra diagnostics
-      children_values = q_root,
-      root_gumbel     = root_gumbel,
-      final_qvalues   = completed_q,
-      final_score     = final_score,
-      visit_counts    = visit_root,
+      # --- decision & training targets ---
+      action           = best_a,                        # int32  [B]
+      action_weights   = action_weights,                # float [B, A]
+
+      # --- convenience for analysis ---
+      search_logits    = search_logits,                 # [B, A]
+
+      # --- root‑level diagnostics ---
+      children_values  = q_root,                        # [B, A]
+      visit_counts     = visit_root,                    # [B, A]
+      root_gumbel      = root_gumbel,                   # [B, A]
+      root_prior_logits= root.prior_logits,             # [B, A]
+
+      # after q‑transform
+      final_qvalues    = completed_q,                   # [B, A]
+      final_score      = final_score,                   # [B, A]
+
+      # internals of q‑transform
+      raw_value        = raw_value,                     # [B]
+      mixed_value      = mixed_value,                   # [B]
+      maxvisit         = maxvisit,                      # [B]
+      rescaled_qvalues = rescaled_q,                   # [B, A]  (optional)
+      rescaled_qvalues2 = rescaled_q,                   # [B, A]  (optional)
   )
 
 def gumbel_muzero_policy_bfs3(
