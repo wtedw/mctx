@@ -298,21 +298,46 @@ def gumbel_muzero_policy_sh2(
   q_comb  = (q1_sel * v1_sel + q2) / (v1_sel + v2 + 1e-6)                   # [B,8]
   vcnt2   = v1_sel + v2                                                     # [B,8]
 
+  # # ------------------------------------------------------------------------
+  # # 3) Assemble per-action arrays for the root (q & visit-count)
+  # # ------------------------------------------------------------------------
+  # q_root   = jnp.zeros((B, A));   visit_root = jnp.zeros((B, A), jnp.int32)
+  # batch_r  = jnp.arange(B)[:, None]
+
+  # # fill round-1 (16 arms, 1 visit each) -----------------------------
+  # q_root   = q_root.at[batch_r, first_idx].set(layer1_qvalues)
+  # visit_root = visit_root.at[batch_r, first_idx].set(layer1_visits)
+
+  # # overwrite the 8 survivors with the averaged value / 2 visits ----
+  # q_root   = q_root.at[batch_r, second_idx].set(q_comb)
+  # visit_root = visit_root.at[batch_r, second_idx].set(vcnt2)
+
+
   # ------------------------------------------------------------------------
-  # 3) Assemble per-action arrays for the root (q & visit-count)
+  # 3) [optimized] Assemble per‑action arrays for the root (q & visit‑count)
   # ------------------------------------------------------------------------
-  q_root   = jnp.zeros((B, A));   visit_root = jnp.zeros((B, A), jnp.int32)
-  batch_r  = jnp.arange(B)[:, None]
+  #
+  #  – layer‑1 contribution ………………   first_idx,     layer1_qvalues / layer1_visits
+  #  – layer‑2 overwrite   ………………   second_idx,    q_comb        / vcnt2
+  #    (second_idx ⊂ first_idx, so we “mask‑away & add” to overwrite)
 
-  # fill round-1 (16 arms, 1 visit each) -----------------------------
-  q_root   = q_root.at[batch_r, first_idx].set(layer1_qvalues)
-  visit_root = visit_root.at[batch_r, first_idx].set(layer1_visits)
+  # One‑hot masks -----------------------------------------------------------
+  mask1 = jax.nn.one_hot(first_idx,  A)                    # [B, K₁, A]
+  mask2 = jax.nn.one_hot(second_idx, A)                    # [B, K₂, A]
 
-  # overwrite the 8 survivors with the averaged value / 2 visits ----
-  q_root   = q_root.at[batch_r, second_idx].set(q_comb)
-  visit_root = visit_root.at[batch_r, second_idx].set(vcnt2)
+  # Σ mask * value  →  [B, A] -----------------------------
+  q_l1   = jnp.sum(mask1 * layer1_qvalues[:,  :, None], 1) # first‑rung q
+  v_l1   = jnp.sum(mask1 * layer1_visits[:,   :, None], 1)
 
-  # jax.debug.print("FinSH2+ß\nq_root: {}\nvisit_root: {}", q_root, visit_root)
+  q_l2   = jnp.sum(mask2 * q_comb[:,         :, None], 1)  # second‑rung q
+  v_l2   = jnp.sum(mask2 * vcnt2[:,          :, None], 1)
+
+  mask2_sum = jnp.sum(mask2, axis=1)                       # [B, A]  1 on survivors
+
+  # Overwrite: zero‑out the survivors in layer‑1 arrays,
+  # then add layer‑2 values -----------------------------------------------
+  q_root    = q_l1 * (1 - mask2_sum) + q_l2                # [B, A]
+  visit_root= v_l1 * (1 - mask2_sum) + v_l2.astype(v_l1.dtype)
 
   # ------------------------------------------------------------------------
   # 4) Completed-Q transform & final root decision
