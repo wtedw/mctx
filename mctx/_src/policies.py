@@ -524,11 +524,18 @@ def gumbel_muzero_policy_sh3(
   best_child  = jnp.argmax(to_argmax, axis=-1).astype(jnp.int32)   # [B,8]
 
   # [layer1]
-  layer1_halved_completed_q = jnp.zeros_like(layer1_halved_logits)
   K = num_layer1_expansions
   _, best_child = jax.lax.top_k(layer1_halved_logits, num_layer1_expansions) # [B,8,K]
 
+
+  # [layer1] check if hardcoded 4 actions taken were illegal
+  layer1_child_action_logit = jnp.take_along_axis(layer1_halved_logits, best_child, -1)  # [B,8,K]
+  # child is illegal if its logit was -inf ----------------------------------
+  valid_leaf_mask = jnp.isfinite(layer1_child_action_logit)          # [B,8,K] Bool
+
+
   # Flatten and expand those leaf actions
+  Bx8 = B * top_k_second
   Bx8x4 = B * top_k_second * num_layer1_expansions
   leaf_actions = best_child.reshape(-1) # [B*8*K]
 
@@ -570,7 +577,8 @@ def gumbel_muzero_policy_sh3(
 
   layer2 = jax.tree_map(unflat_leaf, flat2_out)  # [B,8,K,…]
 
-  q2_leaf = layer2.reward + layer2.discount * layer2.value  # [B,8,K]
+  q2_leaf_raw = layer2.reward + layer2.discount * layer2.value  # [B,8,K]
+  q2_leaf = jnp.where(valid_leaf_mask, q2_leaf_raw, 0.0)       # zero‑out illegal
   r1 = jnp.take_along_axis(layer1_out.reward, second_loc, 1)[..., None]
   γ1 = jnp.take_along_axis(layer1_out.discount, second_loc, 1)[..., None]
   q2_full = r1 + γ1 * q2_leaf  # [B,8,K]
@@ -579,7 +587,8 @@ def gumbel_muzero_policy_sh3(
   v1_sel = jnp.take_along_axis(layer1_visits, second_loc, 1)   # [B,8]
 
   q_children_sum = q2_full.sum(axis=-1)  # [B,8]
-  v_children = jnp.where(illegal_parent, 0, K).astype(jnp.int32)  # [B,8]
+  v_children = jnp.where(illegal_parent, 0,
+                             valid_leaf_mask.sum(axis=-1))  # visits per parent
 
   q_comb = (q1_sel * v1_sel + q_children_sum) / (v1_sel + v_children + 1e-6)  # [B,8]
   vcnt2 = v1_sel + v_children  # [B,8]                                                # [B,8]
@@ -684,7 +693,6 @@ def gumbel_muzero_policy_sh3(
       rescaled_qvalues = rescaled_q,                   # [B, A]  (optional)
       rescaled_qvalues2 = rescaled_q,                   # [B, A]  (optional)
   )
-
 
 def gumbel_muzero_policy_bfs3(
   params: base.Params,
