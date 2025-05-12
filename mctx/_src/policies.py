@@ -133,7 +133,6 @@ def gumbel_muzero_policy_sh2(
     top_k_second: int = 8,      # second SH rung (top_k_first // 2)
     gumbel_scale: chex.Numeric = 1.0,
     invalid_actions: Optional[chex.Array] = None,
-    # Completed-Q scaling
     value_scale: chex.Numeric = 0.1,
     maxvisit_init: chex.Numeric = 50.0,
     rescale_values: bool = True,
@@ -185,12 +184,53 @@ def gumbel_muzero_policy_sh2(
   layer1_qvalues = layer1_out.reward + layer1_out.discount * layer1_out.value
   layer1_visits  = jnp.ones_like(layer1_qvalues, dtype=jnp.int32) # visits = 1
 
+  # [This is the same as _fast_gather2d, since they're rank 2]
+  # def fast_gather2d_last(x: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+  #   """Replacement for jnp.take_along_axis(x, idx, axis=-1) on [B,A]."""
+  #   if x.ndim != 2 or idx.ndim != 2:
+  #       raise ValueError("rank‑2 only")
+  #   if idx.shape[0] != x.shape[0]:
+  #       raise ValueError("batch mismatch")
+  #   mask = jax.nn.one_hot(idx, x.shape[1], dtype=x.dtype)   # [B,K,A]
+  #   return jnp.einsum('bka,ba->bk', mask, x)                #  b k a , b a -> b k
+
+  def _fast_gather2d(x: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+      """
+      TPU‑friendly replacement for
+
+          jnp.take_along_axis(x, idx, axis=1)     # x : [B, N] , idx : [B, K]
+
+      Parameters
+      ----------
+      x   : [B, N]  – values to gather from
+      idx : [B, K]  – int32 / int64 row indices to take (axis 1)
+
+      Returns
+      -------
+      out : [B, K]  – same as the Gather version
+      """
+      # if x.ndim != 2 or idx.ndim != 2:
+      #     raise ValueError("Both `x` and `idx` must be rank‑2 for this helper")
+      # if idx.shape[0] != x.shape[0]:
+      #     raise ValueError("Batch dimension (axis 0) of `idx` must match `x`")
+
+      # one‑hot mask: [B, K, N]   (B=batch, K=number of indices, N=source length)
+      mask = jax.nn.one_hot(idx, x.shape[1], dtype=x.dtype)   # idx : [B, K]
+
+      out = jnp.einsum('bkn,bn->bk', mask, x)                 # result [B, K]
+      return out
+
   # ------------------------------------------------------------------
   # 1-bis)  Mask out actions that are invalid at the root
   # ------------------------------------------------------------------
   if invalid_actions is not None:
+      ###### [optblock]
+      ### [opt1]
       # valid_mask : 1 for legal actions, 0 for invalid
-      layer1_valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
+      # layer1_valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
+      ### [opt2]
+      layer1_valid_mask = 1 - _fast_gather2d(invalid_actions, first_idx)  # [B,16]
+
 
       layer1_qvalues = layer1_qvalues * layer1_valid_mask
       layer1_visits = layer1_visits * layer1_valid_mask.astype(layer1_qvalues.dtype) # visits = 0 for invalid
@@ -221,20 +261,51 @@ def gumbel_muzero_policy_sh2(
   # ------------------------------------------------------------------------
   # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
   # ------------------------------------------------------------------------
-  # score_after_1 = g   + logit   + q1
-  score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
-           + jnp.take_along_axis(root.prior_logits, first_idx, -1) + layer1_cqvalues
+  ###### [optblock]
+  # ### opt1]
+  # # score_after_1 = g   + logit   + q1
+  # score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
+  #          + jnp.take_along_axis(root.prior_logits, first_idx, -1) + layer1_cqvalues
+  ### [opt2]
+  score1 = _fast_gather2d(root_gumbel, first_idx) \
+           + _fast_gather2d(root.prior_logits, first_idx) + layer1_cqvalues
+
+
   masked_score1 = jnp.where(layer1_score_mask, -jnp.inf, score1)
   _, second_loc = jax.lax.top_k(masked_score1, top_k_second)       # [B, 8] the idx within the 16
-  second_idx = jnp.take_along_axis(first_idx, second_loc, -1)      # [B, 8]
+  ###### [optblock]
+  # ### [opt1]
+  # second_idx = jnp.take_along_axis(first_idx, second_loc, -1)      # [B, 8]
+  ### [opt2]
+  second_idx = _fast_gather2d(first_idx, second_loc)
 
-  # 2‑b) which of those 8 parents were illegal to begin with? --------------
-  illegal_parent = jnp.take_along_axis(layer1_score_mask, second_loc, 1)  # [B,8] Bool
+  ###### [optblock]
+  # ### [opt1]
+  # # 2‑b) which of those 8 parents were illegal to begin with? --------------
+  # illegal_parent = jnp.take_along_axis(layer1_score_mask, second_loc, 1)  # [B,8] Bool
+  ### [opt2]
+  illegal_parent = _fast_gather2d(layer1_score_mask, second_loc)
 
-  # Expand *one child* of each of those 8 parents in layer 1 --------------------------
-  # Gather the chosen parents’ logits so we can pick a child
-  layer1_halved_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
-                                     second_loc[..., None], 1)      # -> [B,8,A]
+  # # [layer1_halved_logits original]
+  # # Expand *one child* of each of those 8 parents in layer 1 --------------------------
+  # # Gather the chosen parents’ logits so we can pick a child
+  # layer1_halved_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
+  #                                    second_loc[..., None], 1)      # -> [B,8,A]
+
+  # [layer1_halved_logits optimized]
+  # ① build mask once, keep dtype = x.dtype for free mixing with bfloat16
+  layer1_survivor_mask = jax.nn.one_hot(second_loc, top_k_first,  # [B, 8, 16]
+                                dtype=layer1_out.prior_logits.dtype)
+
+  # ② dot over the “16” axis  →  [B, 8, A]
+  layer1_halved_logits = jnp.einsum(
+          'bku, bua -> bka', layer1_survivor_mask, layer1_out.prior_logits)
+  # or, explicitly with dot_general so you see the axes:
+  # layer1_halved_logits = jax.lax.dot_general(
+  #       survivor_mask, layer1_out.prior_logits,
+  #       (((2,), (1,)),   # contracting u‑dimension
+  #        ((),      ()))) # no batch extras
+
 
   # completed-Q values for each of the 8 parents (all children unvisited → 0)
   layer1_halved_completed_q = jnp.zeros_like(layer1_halved_logits)
@@ -263,17 +334,62 @@ def gumbel_muzero_policy_sh2(
   #       axis=1)                 # gather along the “16’’ axis
   #   return picked.reshape(Bx8, *x.shape[2:])   # [B*8, …]
 
-  def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
-    """Pick the 8 survivors from the 16 parents and flatten to [B*8, …]."""
-    # Build an index tensor with the **same rank** as `x`.
-    if x.ndim == 2:                       # [B, 16]
-        idx = second_loc                  # [B, 8]
-    else:                                 # [B, 16, …]
-        extra = (None,) * (x.ndim - 2)    # e.g. (None,) or (None,None)
-        idx   = second_loc[..., *extra]   # [B, 8, 1, 1, …]
+  # ------------------------------------------------------------------
+# 2) rank ≥ 3, gather ROWS (axis = 1)
+#    shapes:  x  [B, N, …] ,  idx [B, K]  →  out [B, K, …]
 
-    picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
-    return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
+
+  def _fast_gather_rows(x: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+      """
+      TPU‑friendly replacement for
+
+          jnp.take_along_axis(x, idx[..., None], axis=1)
+
+      and it works for **both** shapes
+
+          x   : [B, N]                 (rank‑2)
+          x   : [B, N, F1, F2, …]      (rank ≥ 3)
+
+      Parameters
+      ----------
+      x   : jnp.ndarray
+            The source tensor.  Axis 0 is batch, axis 1 is the row dimension
+            you want to gather from.
+      idx : jnp.ndarray
+            Shape [B, K] (rank‑2).  Each `idx[b]` contains K integer row indices
+            in `0 … N ‑ 1` for the *same* batch element `b`.
+
+      Returns
+      -------
+      out : jnp.ndarray
+            Shape [B, K, ...] – rows selected from `x`.  Trailing feature axes
+            (`...`) are preserved if present.  For rank‑2 input the result is
+            [B, K].
+      """
+      if idx.ndim != 2 or idx.shape[0] != x.shape[0]:
+          raise ValueError("`idx` must be [B, K] with the same batch size as `x`")
+      if x.ndim < 2:
+          raise ValueError("`x` must be rank ≥ 2 with the gather axis at pos 1")
+
+      B, N = x.shape[0], x.shape[1]          # batch size, #rows in source
+      # One‑hot mask: [B, K, N]  (stored in x.dtype ⇒ keeps bf16/f32 throughput)
+      mask = jax.nn.one_hot(idx, N, dtype=x.dtype)
+
+      # Batched matmul:  mask[b, k, n] ⋅ x[b, n, …]  → out[b, k, …]
+      out = jax.lax.dot_general(
+          mask, x,
+          (((2,), (1,)),      #  contract N‑axis of mask with row‑axis of x
+          ((0,), (0,))))     #  keep batch axis
+
+      return out
+
+  def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    Pick the 8 survivors (rows indexed by `second_loc`) from the 16 parents
+    and flatten to [B*8, …].  Works for rank‑2 and rank‑≥3 tensors.
+    """
+    picked = _fast_gather_rows(x, second_loc)          # [B, 8, …] or [B, 8]
+    return picked.reshape(Bx8, *x.shape[2:])           # flatten first two axes
 
   # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
   layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
@@ -284,13 +400,30 @@ def gumbel_muzero_policy_sh2(
 
   # 2‑e) compute q₂ only for *legal* parents --------------------------------
   q2_leaf = layer2.reward + layer2.discount * layer2.value                  # [B,8]
-  r1      = jnp.take_along_axis(layer1_out.reward,   second_loc, 1)
-  γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)
+  ###### [optblock]
+  # ### [opt1]
+  # r1      = jnp.take_along_axis(layer1_out.reward,   second_loc, 1)
+  # γ1      = jnp.take_along_axis(layer1_out.discount, second_loc, 1)
+  ### [opt2]
+  # ------------------------------------------------------------------
+  # (a) values and discounts of the 8 survivors  (rank‑2)
+  # ------------------------------------------------------------------
+  r1 = _fast_gather2d(layer1_out.reward,   second_loc)   # [B,8]
+  γ1 = _fast_gather2d(layer1_out.discount, second_loc)   # [B,8]
   q2_full = r1 + γ1 * q2_leaf                                               # [B,8]
 
-  # mask‑out the illegal parents: keep their original q₁, no extra visit
-  q1_sel  = jnp.take_along_axis(layer1_qvalues, second_loc, 1)              # [B,8]
-  v1_sel  = jnp.take_along_axis(layer1_visits,  second_loc, 1)              # [B,8]
+  ###### [optblock]
+  # ### [opt1]
+  # # mask‑out the illegal parents: keep their original q₁, no extra visit
+  # q1_sel  = jnp.take_along_axis(layer1_qvalues, second_loc, 1)              # [B,8]
+  # v1_sel  = jnp.take_along_axis(layer1_visits,  second_loc, 1)              # [B,8]
+  ### [opt2]
+  # ------------------------------------------------------------------
+  # (b) q / visit counts from the first rung that correspond to the
+  #     same 8 survivors                                      (rank‑2)
+  # ------------------------------------------------------------------
+  q1_sel = _fast_gather2d(layer1_qvalues, second_loc)    # [B,8]
+  v1_sel = _fast_gather2d(layer1_visits,  second_loc)    # [B,8]
 
   q2      = jnp.where(illegal_parent, 0.0, q2_full)                         # [B,8]
   v2      = jnp.where(illegal_parent, 0,   1).astype(jnp.int32)             # [B,8]
@@ -298,9 +431,9 @@ def gumbel_muzero_policy_sh2(
   q_comb  = (q1_sel * v1_sel + q2) / (v1_sel + v2 + 1e-6)                   # [B,8]
   vcnt2   = v1_sel + v2                                                     # [B,8]
 
-  # # ------------------------------------------------------------------------
-  # # 3) Assemble per-action arrays for the root (q & visit-count)
-  # # ------------------------------------------------------------------------
+  # # # ------------------------------------------------------------------------
+  # # # 3) [original] Assemble per-action arrays for the root (q & visit-count)
+  # # # ------------------------------------------------------------------------
   # q_root   = jnp.zeros((B, A));   visit_root = jnp.zeros((B, A), jnp.int32)
   # batch_r  = jnp.arange(B)[:, None]
 
@@ -316,7 +449,6 @@ def gumbel_muzero_policy_sh2(
   # ------------------------------------------------------------------------
   # 3) [optimized] Assemble per‑action arrays for the root (q & visit‑count)
   # ------------------------------------------------------------------------
-  #
   #  – layer‑1 contribution ………………   first_idx,     layer1_qvalues / layer1_visits
   #  – layer‑2 overwrite   ………………   second_idx,    q_comb        / vcnt2
   #    (second_idx ⊂ first_idx, so we “mask‑away & add” to overwrite)
@@ -336,8 +468,11 @@ def gumbel_muzero_policy_sh2(
 
   # Overwrite: zero‑out the survivors in layer‑1 arrays,
   # then add layer‑2 values -----------------------------------------------
+  # `batch_r` / scatters removed; shapes unchanged for the downstream code.
   q_root    = q_l1 * (1 - mask2_sum) + q_l2                # [B, A]
   visit_root= v_l1 * (1 - mask2_sum) + v_l2.astype(v_l1.dtype)
+
+
 
   # ------------------------------------------------------------------------
   # 4) Completed-Q transform & final root decision
