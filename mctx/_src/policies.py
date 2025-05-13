@@ -393,27 +393,27 @@ def gumbel_muzero_policy_sh2(
       return out
 
   ###### [optblock]
-  # ### [opt1]
-  # def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
-  #   """
-  #   Pick the 8 survivors (rows indexed by `second_loc`) from the 16 parents
-  #   and flatten to [B*8, …].  Works for rank‑2 and rank‑≥3 tensors.
-  #   """
-  #   picked = _fast_gather_rows(x, second_loc)          # [B, 8, …] or [B, 8]
-  #   return picked.reshape(Bx8, *x.shape[2:])           # flatten first two axes
+  ### [opt1]
+  def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    Pick the 8 survivors (rows indexed by `second_loc`) from the 16 parents
+    and flatten to [B*8, …].  Works for rank‑2 and rank‑≥3 tensors.
+    """
+    picked = _fast_gather_rows(x, second_loc)          # [B, 8, …] or [B, 8]
+    return picked.reshape(Bx8, *x.shape[2:])           # flatten first two axes
 
   ### [opt2]
-  def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
-    """Pick the 8 survivors from the 16 parents and flatten to [B*8, …]."""
-    # Build an index tensor with the **same rank** as `x`.
-    if x.ndim == 2:                       # [B, 16]
-        idx = second_loc                  # [B, 8]
-    else:                                 # [B, 16, …]
-        extra = (None,) * (x.ndim - 2)    # e.g. (None,) or (None,None)
-        idx   = second_loc[..., *extra]   # [B, 8, 1, 1, …]
+  # def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
+  #   """Pick the 8 survivors from the 16 parents and flatten to [B*8, …]."""
+  #   # Build an index tensor with the **same rank** as `x`.
+  #   if x.ndim == 2:                       # [B, 16]
+  #       idx = second_loc                  # [B, 8]
+  #   else:                                 # [B, 16, …]
+  #       extra = (None,) * (x.ndim - 2)    # e.g. (None,) or (None,None)
+  #       idx   = second_loc[..., *extra]   # [B, 8, 1, 1, …]
 
-    picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
-    return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
+  #   picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
+  #   return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
 
 
   # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
