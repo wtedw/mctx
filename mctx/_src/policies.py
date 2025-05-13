@@ -215,18 +215,26 @@ def gumbel_muzero_policy_sh2(
       #     raise ValueError("Batch dimension (axis 0) of `idx` must match `x`")
 
       # one‑hot mask: [B, K, N]   (B=batch, K=number of indices, N=source length)
+
       mask = jax.nn.one_hot(idx, x.shape[1], dtype=x.dtype)   # idx : [B, K]
 
       out = jnp.einsum('bkn,bn->bk', mask, x)                 # result [B, K]
+
       return out
+
+      # mask = jax.nn.one_hot(idx, x.shape[1], dtype=jnp.float32)
+      # gath = jax.lax.dot_general(mask, x.astype(jnp.float32),
+      #                           (((2,), (1,)), ((0,), (0,))))
+      # return gath.astype(x.dtype)
+
 
   # ------------------------------------------------------------------
   # 1-bis)  Mask out actions that are invalid at the root
   # ------------------------------------------------------------------
   if invalid_actions is not None:
       ###### [optblock]
-      ### [opt1]
-      # valid_mask : 1 for legal actions, 0 for invalid
+      # ### [opt1]
+      # # valid_mask : 1 for legal actions, 0 for invalid
       # layer1_valid_mask = 1 - jnp.take_along_axis(invalid_actions, first_idx, -1)  # [B,16]
       ### [opt2]
       layer1_valid_mask = 1 - _fast_gather2d(invalid_actions, first_idx)  # [B,16]
@@ -262,13 +270,13 @@ def gumbel_muzero_policy_sh2(
   # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
   # ------------------------------------------------------------------------
   ###### [optblock]
-  # ### opt1]
-  # # score_after_1 = g   + logit   + q1
-  # score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
-  #          + jnp.take_along_axis(root.prior_logits, first_idx, -1) + layer1_cqvalues
-  ### [opt2]
-  score1 = _fast_gather2d(root_gumbel, first_idx) \
-           + _fast_gather2d(root.prior_logits, first_idx) + layer1_cqvalues
+  ### opt1]
+  # score_after_1 = g   + logit   + q1
+  score1 = jnp.take_along_axis(root_gumbel, first_idx, -1) \
+           + jnp.take_along_axis(root.prior_logits, first_idx, -1) + layer1_cqvalues
+  # ### [opt2]
+  # score1 = _fast_gather2d(root_gumbel, first_idx) \
+  #          + _fast_gather2d(root.prior_logits, first_idx) + layer1_cqvalues
 
 
   masked_score1 = jnp.where(layer1_score_mask, -jnp.inf, score1)
@@ -286,25 +294,26 @@ def gumbel_muzero_policy_sh2(
   ### [opt2]
   illegal_parent = _fast_gather2d(layer1_score_mask, second_loc)
 
-  # # [layer1_halved_logits original]
-  # # Expand *one child* of each of those 8 parents in layer 1 --------------------------
-  # # Gather the chosen parents’ logits so we can pick a child
-  # layer1_halved_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
-  #                                    second_loc[..., None], 1)      # -> [B,8,A]
+  ###### [optblock]
+  ### [opt1][layer1_halved_logits original]
+  # Expand *one child* of each of those 8 parents in layer 1 --------------------------
+  # Gather the chosen parents’ logits so we can pick a child
+  layer1_halved_logits = jnp.take_along_axis(layer1_out.prior_logits,           # [B,16,A]
+                                     second_loc[..., None], 1)      # -> [B,8,A]
 
-  # [layer1_halved_logits optimized]
-  # ① build mask once, keep dtype = x.dtype for free mixing with bfloat16
-  layer1_survivor_mask = jax.nn.one_hot(second_loc, top_k_first,  # [B, 8, 16]
-                                dtype=layer1_out.prior_logits.dtype)
+  # ### [opt2] [layer1_halved_logits optimized]
+  # # ① build mask once, keep dtype = x.dtype for free mixing with bfloat16
+  # layer1_survivor_mask = jax.nn.one_hot(second_loc, top_k_first,  # [B, 8, 16]
+  #                               dtype=layer1_out.prior_logits.dtype)
 
-  # ② dot over the “16” axis  →  [B, 8, A]
-  layer1_halved_logits = jnp.einsum(
-          'bku, bua -> bka', layer1_survivor_mask, layer1_out.prior_logits)
-  # or, explicitly with dot_general so you see the axes:
-  # layer1_halved_logits = jax.lax.dot_general(
-  #       survivor_mask, layer1_out.prior_logits,
-  #       (((2,), (1,)),   # contracting u‑dimension
-  #        ((),      ()))) # no batch extras
+  # # ② dot over the “16” axis  →  [B, 8, A]
+  # layer1_halved_logits = jnp.einsum(
+  #         'bku, bua -> bka', layer1_survivor_mask, layer1_out.prior_logits)
+  # # or, explicitly with dot_general so you see the axes:
+  # # layer1_halved_logits = jax.lax.dot_general(
+  # #       survivor_mask, layer1_out.prior_logits,
+  # #       (((2,), (1,)),   # contracting u‑dimension
+  # #        ((),      ()))) # no batch extras
 
 
   # completed-Q values for each of the 8 parents (all children unvisited → 0)
@@ -383,13 +392,29 @@ def gumbel_muzero_policy_sh2(
 
       return out
 
+  ###### [optblock]
+  # ### [opt1]
+  # def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
+  #   """
+  #   Pick the 8 survivors (rows indexed by `second_loc`) from the 16 parents
+  #   and flatten to [B*8, …].  Works for rank‑2 and rank‑≥3 tensors.
+  #   """
+  #   picked = _fast_gather_rows(x, second_loc)          # [B, 8, …] or [B, 8]
+  #   return picked.reshape(Bx8, *x.shape[2:])           # flatten first two axes
+
+  ### [opt2]
   def gather_parents_leaf(x: jnp.ndarray) -> jnp.ndarray:
-    """
-    Pick the 8 survivors (rows indexed by `second_loc`) from the 16 parents
-    and flatten to [B*8, …].  Works for rank‑2 and rank‑≥3 tensors.
-    """
-    picked = _fast_gather_rows(x, second_loc)          # [B, 8, …] or [B, 8]
-    return picked.reshape(Bx8, *x.shape[2:])           # flatten first two axes
+    """Pick the 8 survivors from the 16 parents and flatten to [B*8, …]."""
+    # Build an index tensor with the **same rank** as `x`.
+    if x.ndim == 2:                       # [B, 16]
+        idx = second_loc                  # [B, 8]
+    else:                                 # [B, 16, …]
+        extra = (None,) * (x.ndim - 2)    # e.g. (None,) or (None,None)
+        idx   = second_loc[..., *extra]   # [B, 8, 1, 1, …]
+
+    picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
+    return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
+
 
   # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
   layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
@@ -533,6 +558,7 @@ def gumbel_muzero_policy_sh2(
       rescaled_qvalues = rescaled_q,                   # [B, A]  (optional)
       rescaled_qvalues2 = rescaled_q,                   # [B, A]  (optional)
   )
+
 
 def gumbel_muzero_policy_bfs3(
   params: base.Params,
