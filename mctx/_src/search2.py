@@ -137,7 +137,10 @@ def set_row_cols(x:        jnp.ndarray,   # [B, N, A]
   # 4) delta we need to apply at the chosen columns
   #     delta = -old_row*mask + new_row
   # ------------------------------------------------------------------
-  delta_row    = -old_row * col_mask_sum + new_row              # [B,A]
+  # [ted] this will cause a neg 0
+  # delta_row    = -old_row * col_mask_sum + new_row              # [B,A]
+  delta_row = (new_row - old_row) * col_mask_sum   # 0 outside the mask
+
 
   # ------------------------------------------------------------------
   # 5) write back — add the delta only at the selected row
@@ -145,6 +148,25 @@ def set_row_cols(x:        jnp.ndarray,   # [B, N, A]
   x_updated    = x + row_mask3 * delta_row[:, None, :]          # [B,N,A]
   return x_updated
 
+# ------------------------------------------------------------------
+# helper: scatter-free row/col update *with* validity mask
+# ------------------------------------------------------------------
+def set_row_cols_masked(x, row_idx, col_idx, vals, valid):
+  """
+  Same signature as `set_row_cols` with an extra
+      valid[b, m] ∈ {0,1}
+  Only (row_idx[b], col_idx[b,m]) with valid==1 are overwritten.
+  """
+  dtype     = x.dtype
+  mask_c    = jax.nn.one_hot(col_idx, x.shape[-1], dtype) * valid[..., None]  # [B,M,A]
+  new_row   = (mask_c * vals[..., None]).sum(1)                               # [B,A]
+  any_mask  = mask_c.sum(1).clip(max=1.)                                      # [B,A]
+
+  row_mask3 = jax.nn.one_hot(row_idx, x.shape[1], dtype)[..., None]           # [B,N,1]
+  old_row   = (x * row_mask3).sum(1)                                          # [B,A]
+  delta     = -old_row * any_mask + new_row                                   # [B,A]
+
+  return x + row_mask3 * delta[:, None, :]
 
 # ---------------------------------------------------------------------
 # Overwrite one (parent,action) cell  – rank‑3 ([B,N,A] or [N,A])
@@ -473,9 +495,9 @@ def search2(
 
 
     def backward_root_children(tree, layer1_visits):
-      # parent = Tree.ROOT_INDEX
-      # layer1_visits = jnp.sum(layer1_visits, axis=-1)
-      # parent_value = (tree.node_values[:, parent] + layer1_qvalues)  / (1 + layer1_visits)
+      parent = Tree.ROOT_INDEX
+      layer1_visits = jnp.sum(layer1_visits, axis=-1)
+      parent_value = (tree.node_values[:, parent] + layer1_qvalues)  / (1 + layer1_visits)
       children_values = layer1_out.value # [B, m]
       children_counts = jnp.ones_like(children_values) # [B, m]
 
@@ -484,8 +506,8 @@ def search2(
       # root_children_indices = jnp.broadcast_to(top_m_indices, (batch_size, M))
 
       # [ted] These aren't used for Gumbel Muzero
-      # root_value = set_row(tree.node_values, parent, parent_value),
-      # root_visits = set_row(tree.node_visits, parent, count + 1),
+      root_value = set_row(tree.node_values, parent, parent_value),
+      root_visits = set_row(tree.node_visits, parent, count + 1),
 
       # --- 1) update children_values: shape [B, N, A] ---
       # root_children_values = batch_update(tree.children_values, children_values, )
@@ -506,9 +528,9 @@ def search2(
       )
 
       tree = tree.replace(
-          # [ted] Not used for Gumbel Muzero
-          # node_values=root_value,
-          # node_visits=root_visits,
+          # [ted] node_values + node_visits for root is Not used for Gumbel Muzero
+          node_values=root_value,
+          node_visits=root_visits,
           children_values=root_children_values,
           children_visits=root_children_visits)
 
