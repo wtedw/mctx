@@ -59,6 +59,93 @@ def set_row(x: jnp.ndarray,                # [B,N]  or [N]
 
     return x * (1 - mask) + val_exp * mask
 
+# v1
+# def set_row_cols(x:         jnp.ndarray,   # [B, N, A]  – tensor to update
+#                  row_idx:   jnp.ndarray,   # [B]        – which row per batch
+#                  col_idx:   jnp.ndarray,   # [B, M]     – cols to overwrite
+#                  vals:      jnp.ndarray    # [B, M]     – new values
+#                 ) -> jnp.ndarray:
+#   """
+#   Scatter-free replacement for:
+#       x[batch, row_idx[b], col_idx[b, m]] = vals[b, m]
+
+#   Works for float tensors (children_values) and int tensors (children_visits).
+
+#   • x         : [B, N, A]  – any dtype
+#   • row_idx   : [B]        – per-batch row (e.g. ROOT_INDEX=0)
+#   • col_idx   : [B, M]     – per-batch list of columns being written
+#   • vals      : [B, M]     – value for each (row_idx, col_idx) pair
+#   """
+#   B, N, A = x.shape
+#   M       = col_idx.shape[1]
+#   dtype   = x.dtype
+
+#   # 1) one-hot over columns  →  mask_c ∈ {0,1}^{B×M×A}
+#   mask_c  = jax.nn.one_hot(col_idx, A, dtype=dtype)           # [B,M,A]
+#   new_row = jnp.sum(mask_c * vals[..., None].astype(dtype),   # [B,M,1]
+#                     axis=1)                                   # [B,A]
+
+#   # 2) which columns are touched?
+#   any_mask = jnp.minimum(jnp.sum(mask_c, axis=1), 1).astype(dtype)  # [B,A]
+
+#   # 3) gather current row *without* scatter/gather ops
+#   mask_r   = jax.nn.one_hot(row_idx, N, dtype=dtype)          # [B,N]
+#   old_row  = jnp.sum(mask_r[:, :, None] * x, axis=1)          # [B,A]
+
+#   # 4) blend: keep untouched cols, overwrite the visited ones
+#   blended  = old_row * (1 - any_mask) + new_row
+
+#   # 5) write the whole row back with the existing `set_row`
+#   return set_row(x, row_idx, blended)
+
+# v2
+def set_row_cols(x:        jnp.ndarray,   # [B, N, A]
+                 row_idx:  jnp.ndarray,   # [B]        row per batch (axis-1)
+                 col_idx:  jnp.ndarray,   # [B, M]     columns to overwrite
+                 vals:     jnp.ndarray    # [B, M]     new values
+                ) -> jnp.ndarray:
+  """
+  Scatter-free update:
+      x[b, row_idx[b], col_idx[b, m]] ← vals[b, m]
+
+  Works for float or int dtypes with no branches of any kind.
+  """
+  dtype        = x.dtype
+  B, N, A      = x.shape
+  M            = col_idx.shape[1]
+
+  # ------------------------------------------------------------------
+  # 1) masks
+  # ------------------------------------------------------------------
+  row_mask     = jax.nn.one_hot(row_idx, N, dtype=dtype)        # [B,N]
+  row_mask3    = row_mask[..., None]                            # [B,N,1]
+
+  col_mask     = jax.nn.one_hot(col_idx, A, dtype=dtype)        # [B,M,A]
+  col_mask_sum = jnp.sum(col_mask, axis=1)                      # [B,A]  (0/1)
+
+  # ------------------------------------------------------------------
+  # 2) build the new row we want to insert         new_row[b, a]
+  # ------------------------------------------------------------------
+  new_row      = jnp.sum(col_mask * vals[..., None].astype(dtype), axis=1)  # [B,A]
+
+  # ------------------------------------------------------------------
+  # 3) current contents of that row                old_row[b, a]
+  # ------------------------------------------------------------------
+  old_row      = jnp.sum(x * row_mask3, axis=1)                 # [B,A]
+
+  # ------------------------------------------------------------------
+  # 4) delta we need to apply at the chosen columns
+  #     delta = -old_row*mask + new_row
+  # ------------------------------------------------------------------
+  delta_row    = -old_row * col_mask_sum + new_row              # [B,A]
+
+  # ------------------------------------------------------------------
+  # 5) write back — add the delta only at the selected row
+  # ------------------------------------------------------------------
+  x_updated    = x + row_mask3 * delta_row[:, None, :]          # [B,N,A]
+  return x_updated
+
+
 # ---------------------------------------------------------------------
 # Overwrite one (parent,action) cell  – rank‑3 ([B,N,A] or [N,A])
 # ---------------------------------------------------------------------
@@ -210,30 +297,29 @@ def search2(
   def body_fun(loop_state):
     sim, tree, rng_key = loop_state
 
-    rng_key, simulate_key, expand_key = jax.random.split(rng_key, 3)
-    # simulate is vmapped and expects batched rng keys.
-    simulate_keys = jax.random.split(simulate_key, batch_size)
+    # rng_key, simulate_key, expand_key = jax.random.split(rng_key, 3)
+    # # simulate is vmapped and expects batched rng keys.
+    # simulate_keys = jax.random.split(simulate_key, batch_size)
 
-    # [todo] reenable in a bit
+    # # [todo] reenable in a bit
     # parent_index, action = simulate2(
     #     simulate_keys, tree, action_selection_fn, max_depth, root=root)
 
-    # A node first expanded on simulation `i`, will have node index `i`.
-    # Node 0 corresponds to the root node.
-    ### [optblock]
-    # # opt1
-    # next_node_index = tree.children_index[batch_range, parent_index, action]
-    next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
-                                    parent_index,    # [B]
-                                    action)          # [B]
-    next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
-                                sim + 1, next_node_index)
+    # # A node first expanded on simulation `i`, will have node index `i`.
+    # # Node 0 corresponds to the root node.
+    # ### [optblock]
+    # # # opt1
+    # # next_node_index = tree.children_index[batch_range, parent_index, action]
+    # next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
+    #                                 parent_index,    # [B]
+    #                                 action)          # [B]
+    # next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
+    #                             sim + 1, next_node_index)
 
-    # [todo] renable
     # tree = expand2(
     #     params, expand_key, tree, recurrent_fn, parent_index,
     #     action, next_node_index)
-    tree = backward2(tree, next_node_index)
+    # tree = backward2(tree, next_node_index)
     loop_state = (sim, tree, rng_key)
     return loop_state
 
@@ -386,76 +472,49 @@ def search2(
     tree, total_sims = carry
 
 
-    def backward_root_children(tree):
-      parent = Tree.ROOT_INDEX
-      layer1_visits = jnp.sum(layer1_visits, axis=-1)
-      parent_value = (tree.node_values[parent] + layer1_qvalues)  / (1 + layer1_visits)
-      children_values = layer1_out.value # [B, M]
-      children_counts = jnp.ones_like(children_values) # [B, M]
+    def backward_root_children(tree, layer1_visits):
+      # parent = Tree.ROOT_INDEX
+      # layer1_visits = jnp.sum(layer1_visits, axis=-1)
+      # parent_value = (tree.node_values[:, parent] + layer1_qvalues)  / (1 + layer1_visits)
+      children_values = layer1_out.value # [B, m]
+      children_counts = jnp.ones_like(children_values) # [B, m]
 
       # Batch update the tree using scatter-free op
-      top_m_indices = jnp.arange(1, M + 1)
-      root_children_indices = jnp.broadcast_to(top_m_indices, (batch_size, M))
+      # top_m_indices = jnp.arange(1, M + 1)
+      # root_children_indices = jnp.broadcast_to(top_m_indices, (batch_size, M))
 
-      new_root_value = set_row(tree.node_values, parent, parent_value),
-      new_root_visits = set_row(tree.node_visits, parent, count + 1),
-
+      # [ted] These aren't used for Gumbel Muzero
+      # root_value = set_row(tree.node_values, parent, parent_value),
+      # root_visits = set_row(tree.node_visits, parent, count + 1),
 
       # --- 1) update children_values: shape [B, N, A] ---
-      new_children_values = set_rows(
+      # root_children_values = batch_update(tree.children_values, children_values, )
+      # children_values=update(
+      #       tree.children_values, children_values, parent, action),
+      root_children_values = set_row_cols(
           tree.children_values,              # [B, N, A]
-          root_children_indices,             # [B, M]
-          children_values                    # [B, M, A]
+          root_idx_vec,                      # [B]
+          action_idxs,                       # [B, m]
+          children_values                    # [B, m]
       )
       # --- 1) update children_values: shape [B, N, A] ---
-      new_children_visits = set_rows(
+      root_children_visits = set_row_cols(
           tree.children_visits,              # [B, N, A]
-          root_children_indices,             # [B, M]
-          children_counts                    # [B, M, A]
+          root_idx_vec,                      # [B]
+          action_idxs,                       # [B, m]
+          children_counts                    # [B, m]
       )
-
 
       tree = tree.replace(
-          node_values=new_node_values,
-          node_visits=new_node_visits,
-          children_values=new_children_values,
-          children_visits=new_children_visits)
-
-    #   # og for vmapped
-    #   parent = tree.parents[index]
-    #   count = tree.node_visits[parent]
-    #   action = tree.action_from_parent[index]
-    #   reward = tree.children_rewards[parent, action]
-    #   leaf_value = reward + tree.children_discounts[parent, action] * leaf_value
-    #   parent_value = (
-    #       tree.node_values[parent] * count + leaf_value) / (count + 1.0)
-    #   children_values = tree.node_values[index]
-    #   children_counts = tree.children_visits[parent, action] + 1
-
-    #   # batched update
-    #   tree = tree.replace(
-    #     # rank‑3 scalar updates
-    #     children_visits  = set_cell(tree.children_visits,
-    #                                 parent, action, children_counts),
-    #     children_values  = set_cell(tree.children_values,
-    #                                 parent, action, children_values),
-
-    #     # rank‑2 updates
-    #     node_values = set_row(tree.node_values, parent, parent_value),
-    #     node_visits = set_row(tree.node_visits, parent, count + 1),
-    # )
-
-    #   tree = tree.replace(
-    #       node_values=update(tree.node_values, parent_value, parent),
-    #       node_visits=update(tree.node_visits, count + 1, parent),
-    #       children_values=update(
-    #           tree.children_values, children_values, parent, action),
-    #       children_visits=update(
-    #           tree.children_visits, children_counts, parent, action))
+          # [ted] Not used for Gumbel Muzero
+          # node_values=root_value,
+          # node_visits=root_visits,
+          children_values=root_children_values,
+          children_visits=root_children_visits)
 
       return tree
 
-    tree = backward_root_children(tree)
+    tree = backward_root_children(tree, layer1_visits)
 
     jax.debug.print("total sims?: {}", total_sims)
     return tree, total_sims
@@ -465,7 +524,9 @@ def search2(
   init_carry = (total_sims, tree, rng_key)
   jax.debug.print("total sims2?: {}", total_sims)
   total_sims = jnp.full_like(total_sims, fill_value=16)
-  tree, _total_sims = jax.lax.while_loop(cond_fun, body_fun, init_carry)
+
+  # [todo] reenable]
+  # tree, _total_sims = jax.lax.while_loop(cond_fun, body_fun, init_carry)
 
   # ### og
   # _, tree = loop_fn(
