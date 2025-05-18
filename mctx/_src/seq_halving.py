@@ -87,3 +87,58 @@ def get_table_of_considered_visits(max_num_considered_actions, num_simulations):
       get_sequence_of_considered_visits(m, num_simulations)
       for m in range(max_num_considered_actions + 1))
 
+
+def get_active_explorer_table(max_num_considered_actions: int,
+                       num_simulations: int,
+                       p: int # num of explorers
+                      #  ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                       ) -> jnp.ndarray:
+    """
+    Parameters
+    ----------
+    max_num_considered_actions : int
+    num_simulations            : int
+    p                          : int
+        Bucket width (default 16).
+
+    Returns
+    -------
+    considered : ⟨max_m + 1, num_simulations⟩ int32
+    active     : ⟨max_m + 1, num_simulations, p⟩ int32
+        Each slice `active[m, g]` contains the *g-th* run-length group from
+        `considered[m]`, left-padded with that value, right-padded with –1.
+    """
+    # original DeepMind helper
+    considered = jnp.asarray(
+        get_table_of_considered_visits(max_num_considered_actions,
+                                       num_simulations),
+        dtype=jnp.int32)
+
+    # start everything at −1
+    active = -jnp.ones((max_num_considered_actions + 1,
+                        num_simulations, p),
+                       dtype=jnp.int32)
+
+    for m in range(max_num_considered_actions + 1):
+        row = considered[m]                         # (S,)
+        # positions where the value changes
+        change_pts = jnp.nonzero(jnp.diff(row))[0] + 1
+        # prepend 0 and append S to get full segment boundaries
+        boundaries = jnp.concatenate(
+            [jnp.array([0], dtype=jnp.int32),
+             change_pts,
+             jnp.array([num_simulations], dtype=jnp.int32)]
+        )
+
+        # fill one bucket per group
+        for g in range(len(boundaries) - 1):
+            if g >= num_simulations:        # guard: table only has S buckets
+                break
+            start, end = int(boundaries[g]), int(boundaries[g + 1])
+            length = end - start
+            if length == 0:
+                continue
+            active = active.at[m, g, :length].set(row[start])
+
+    return active
+    # return considered, active
