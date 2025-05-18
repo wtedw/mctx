@@ -341,7 +341,6 @@ def search2(
 
   def cond_fun(loop_state):
     sim, tree, rng_key = loop_state
-    jax.debug.print("SIMz: {}", sim)
     return ~jnp.all(sim == num_simulations)
 
   # def body_fun(sim, loop_state):
@@ -577,7 +576,12 @@ def search2(
       child_visit = jnp.ones_like(child_qvalues, dtype=jnp.int32)
 
       # validity mask: 1 for legal, 0 for illegal
-      legal_mask  = (~invalid_actions[batch_range, action_idxs])  # [B,M]
+      # legal_mask  = (~invalid_actions[batch_range, action_idxs])  # [B,M]
+      legal_mask = ~jnp.take_along_axis(
+          invalid_actions,            # (B, A)
+          action_idxs,                # (B, M)
+          axis=1                      # gather along action dimension
+      )                               # result → (B, M)
 
       # ---------- update per-child tables --------------------------------
       root_children_values  = set_row_cols_masked(
@@ -607,13 +611,13 @@ def search2(
     # ------------------------------------------------------------------
     tree = backward_root_children(tree)
 
-    jax.debug.print("total sims?: {}", total_sims)
+    # jax.debug.print("total sims?: {}", total_sims)
     return tree, total_sims
 
   ### opt2
   tree, total_sims = init_root_children(rng_key, tree, root) # equiv. to simulate, expand, backwards for first layer
   init_carry = (total_sims, tree, rng_key)
-  jax.debug.print("total sims2?: {}", total_sims)
+  # jax.debug.print("total sims2?: {}", total_sims)
   total_sims = jnp.full_like(total_sims, fill_value=16)
 
   # [todo] reenable]
