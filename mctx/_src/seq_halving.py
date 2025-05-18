@@ -142,3 +142,44 @@ def get_active_explorer_table(max_num_considered_actions: int,
 
     return active
     # return considered, active
+
+
+
+import numpy as np
+import jax.numpy as jnp
+from functools import lru_cache
+
+
+@lru_cache(maxsize=None)        # memoise across JIT recompiles
+def get_active_explorer_table(max_num_considered_actions: int,
+                              num_simulations: int,
+                              p: int) -> jnp.ndarray:
+    """
+    Returns  active  ∈ ℤ^{max_m+1 × num_simulations × p}.
+    active[m, g, k] = visit-count assigned to the kth explorer bucket
+                      (or –1 if unused).
+    """
+    # 1. “considered” table – original helper already pure-Python
+    considered = np.asarray(
+        get_table_of_considered_visits(max_num_considered_actions,
+                                       num_simulations),
+        dtype=np.int32)                         # shape (max_m+1, S)
+
+    # 2. Allocate result
+    active = -np.ones((max_num_considered_actions + 1,
+                       num_simulations,
+                       p), dtype=np.int32)
+
+    # 3. Fill each row with run-length segments
+    for m in range(max_num_considered_actions + 1):
+        row = considered[m]                    # (S,)
+        change_pts = np.nonzero(np.diff(row))[0] + 1
+        boundaries = np.concatenate(([0], change_pts,
+                                     [num_simulations]))
+        for g in range(len(boundaries) - 1):
+            start, end = boundaries[g], boundaries[g + 1]
+            if end > start:
+                active[m, g, : end - start] = row[start]
+
+    # 4. Hand back a JAX constant
+    return jnp.asarray(active)

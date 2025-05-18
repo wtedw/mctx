@@ -340,12 +340,13 @@ def search2(
 
   # Instead of root action selection, we parallel expand and fill in the tree
   # Each root explorer keeps track of its num_sims expanded thus far
-  active_explorer_table = seq_halving.get_active_explorer_table(max_num_considered_actions, num_simulations) # [M+1, nsim, M]
+  active_explorer_table = seq_halving.get_active_explorer_table(max_num_considered_actions, num_simulations, max_num_considered_actions) # [M+1, nsim, M]
 
   def cond_fun(loop_state):
-    tree, sims, _round, _rng_key = loop_state
+    tree, sims, round, _rng_key = loop_state
     # [todo] what about cases where M is greater than sim?
-    return ~jnp.all(sims >= num_simulations)
+    # return ~jnp.all(sims >= num_simulations)
+    return round < 1
 
   # def body_fun(sim, loop_state):
   def body_fun(loop_state):
@@ -364,22 +365,23 @@ def search2(
     parent_index, action = simulate2(
         simulate_keys, tree, sims, active_explorer_mask, action_selection_fn, max_depth, root=root) # [B,M] for both, -1 if inactive explorer
 
+    jax.debug.print("[sim] parent indx: {}, action: {}", parent_index, action)
     # A node first expanded on simulation `i`, will have node index `i`.
     # Node 0 corresponds to the root node.
 
-    ### [optblock]
-    # # opt1
-    # next_node_index = tree.children_index[batch_range, parent_index, action]
-    next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
-                                    parent_index,    # [B]
-                                    action)          # [B]
-    next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
-                                sim + 1, next_node_index)
+    # ### [optblock]
+    # # # opt1
+    # # next_node_index = tree.children_index[batch_range, parent_index, action]
+    # next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
+    #                                 parent_index,    # [B]
+    #                                 action)          # [B]
+    # next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
+    #                             sim + 1, next_node_index)
 
-    tree = expand2(
-        params, expand_key, tree, recurrent_fn, parent_index,
-        action, next_node_index)
-    tree = backward2(tree, next_node_index)
+    # tree = expand2(
+    #     params, expand_key, tree, recurrent_fn, parent_index,
+    #     action, next_node_index)
+    # tree = backward2(tree, next_node_index)
     loop_state = (tree, sims, round_i + 1, rng_key)
     return loop_state
 
@@ -426,119 +428,243 @@ class _SimulationState(NamedTuple):
   top_root_actions: chex.Array
 
 
-@functools.partial(jax.vmap, in_axes=[0, None, 0, 0, 0, None, None], out_axes=0)
+# @functools.partial(jax.vmap, in_axes=[0, None, 0, 0, 0, None, None], out_axes=0)
+# def simulate_root_child(
+#     rng_key: chex.PRNGKey,
+#     tree: Tree, # unbatched [N, ...] tree
+#     top_root_actions,
+#     node_index,
+#     depth,
+#     action_selection_fn: base.InteriorActionSelectionFn,
+#     max_depth: int,
+#     *,
+#     top_m: int = 16) -> Tuple[chex.Array, chex.Array]:
+#   """Traverses the tree for a single "root child explorer" until reaching an unvisited action or `max_depth`.
+
+#   Each simulation starts from the root and keeps selecting actions traversing
+#   the tree until a leaf or `max_depth` is reached.
+
+#   Args:
+#     rng_key: random number generator state, the key is consumed.
+#     tree: _unbatched_ MCTS tree state.
+#     action_selection_fn: function used to select an action during simulation.
+#     max_depth: maximum search tree depth allowed during simulation.
+
+#   Returns:
+#     `(parent_index, action)` tuple, where `parent_index` is the index of the
+#     node reached at the end of the simulation, and the `action` is the action to
+#     evaluate from the `parent_index`.
+#   """
+#   def cond_fun(state):
+#     return state.is_continuing
+
+#   def body_fun(state):
+#     # Preparing the next simulation state.
+#     node_index = state.next_node_index
+#     rng_key, action_selection_key = jax.random.split(state.rng_key)
+#     action = action_selection_fn(action_selection_key, tree, node_index,
+#                                  state.depth)
+#     next_node_index = tree.children_index[node_index, action]
+#     # The returned action will be visited.
+#     depth = state.depth + 1
+#     is_before_depth_cutoff = depth < max_depth
+#     is_visited = next_node_index != Tree.UNVISITED
+#     is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
+#     return _SimulationState(  # pytype: disable=wrong-arg-types  # jax-types
+#         rng_key=rng_key,
+#         node_index=node_index,
+#         action=action,
+#         next_node_index=next_node_index,
+#         depth=depth,
+#         is_continuing=is_continuing,
+#         top_root_actions=state.top_root_actions)
+
+
+
+#   # pytype: disable=wrong-arg-types  # jnp-type
+#   initial_state = _SimulationState(
+#       rng_key=rng_key,
+#       node_index=tree.NO_PARENT,
+#       action=tree.NO_PARENT,
+#       next_node_index=node_index,
+#       depth=depth,
+#       is_continuing=jnp.array(True),
+#       top_root_actions=top_root_actions)
+#   # pytype: enable=wrong-arg-types
+#   end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
+
+#   # Returning a node with a selected action.
+#   # The action can be already visited, if the max_depth is reached.
+#   return end_state.node_index, end_state.action
+
+# ---------------------------------------------------------------------------
+# Roll out ONE root-child explorer (vectorised over axis-0)
+# ---------------------------------------------------------------------------
+# VMAP layout:
+#   rng_key            – 0
+#   tree               – None  (shared across the M explorers)
+#   is_active          – 0     (bool, True = run, False = skip)
+#   top_root_actions   – 0     (unused – kept for API compatibility)
+#   start_node_index   – 0
+#   depth              – 0
+#   action_selection_fn--None
+#   max_depth--None
+@functools.partial(
+    jax.vmap,
+    in_axes=(0, None, 0, 0, 0, 0, None, None),
+    out_axes=(0, 0))
 def simulate_root_child(
     rng_key: chex.PRNGKey,
-    tree: Tree, # unbatched [N, ...] tree
-    top_root_actions,
-    node_index,
-    depth,
+    tree: Tree,
+    is_active: chex.Array,             # bool[M]
+    top_root_actions: chex.Array,      # int32[M]  (ignored here)
+    node_index: chex.Array,            # int32[M]  (1 … M)
+    depth: chex.Array,                 # int32[M]  (=1)
     action_selection_fn: base.InteriorActionSelectionFn,
-    max_depth: int,
-    *,
-    top_m: int = 16) -> Tuple[chex.Array, chex.Array]:
-  """Traverses the tree for a single "root child explorer" until reaching an unvisited action or `max_depth`.
+    max_depth: int
+) -> Tuple[chex.Array, chex.Array]:
+  """Idle explorers return (Tree.NO_PARENT, Tree.NO_PARENT)."""
 
-  Each simulation starts from the root and keeps selecting actions traversing
-  the tree until a leaf or `max_depth` is reached.
+  NO_PARENT = jnp.asarray(Tree.NO_PARENT, jnp.int32)
 
-  Args:
-    rng_key: random number generator state, the key is consumed.
-    tree: _unbatched_ MCTS tree state.
-    action_selection_fn: function used to select an action during simulation.
-    max_depth: maximum search tree depth allowed during simulation.
+  # -- initial state --------------------------------------------------------
+  init_state = _SimulationState(
+      rng_key          = rng_key,
+      node_index       = NO_PARENT,          # sentinel
+      action           = NO_PARENT,          # sentinel
+      next_node_index  = node_index,         # 1…M (or anything)
+      depth            = depth,
+      is_continuing    = is_active,          # <- key line!
+      top_root_actions = top_root_actions)
 
-  Returns:
-    `(parent_index, action)` tuple, where `parent_index` is the index of the
-    node reached at the end of the simulation, and the `action` is the action to
-    evaluate from the `parent_index`.
-  """
+  # -- body of the MuZero roll-out -----------------------------------------
   def cond_fun(state):
     return state.is_continuing
 
   def body_fun(state):
-    # Preparing the next simulation state.
-    node_index = state.next_node_index
-    rng_key, action_selection_key = jax.random.split(state.rng_key)
-    action = action_selection_fn(action_selection_key, tree, node_index,
-                                 state.depth)
-    next_node_index = tree.children_index[node_index, action]
-    # The returned action will be visited.
-    depth = state.depth + 1
-    is_before_depth_cutoff = depth < max_depth
-    is_visited = next_node_index != Tree.UNVISITED
-    is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
-    return _SimulationState(  # pytype: disable=wrong-arg-types  # jax-types
-        rng_key=rng_key,
-        node_index=node_index,
-        action=action,
-        next_node_index=next_node_index,
-        depth=depth,
-        is_continuing=is_continuing,
-        top_root_actions=state.top_root_actions)
+    cur_node             = state.next_node_index
+    rng_key, sk          = jax.random.split(state.rng_key)
+    act                  = action_selection_fn(sk, tree, cur_node, state.depth)
+    nxt                  = tree.children_index[cur_node, act]
+    d                    = state.depth + 1
+    cont                 = jnp.logical_and(d < max_depth,
+                                           nxt != Tree.UNVISITED)
+    return _SimulationState(rng_key, cur_node, act, nxt, d, cont,
+                            state.top_root_actions)
 
-
-
-  # pytype: disable=wrong-arg-types  # jnp-type
-  initial_state = _SimulationState(
-      rng_key=rng_key,
-      node_index=tree.NO_PARENT,
-      action=tree.NO_PARENT,
-      next_node_index=node_index,
-      depth=depth,
-      is_continuing=jnp.array(True),
-      top_root_actions=top_root_actions)
-  # pytype: enable=wrong-arg-types
-  end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
-
-  # Returning a node with a selected action.
-  # The action can be already visited, if the max_depth is reached.
+  end_state = jax.lax.while_loop(cond_fun, body_fun, init_state)
   return end_state.node_index, end_state.action
 
 
 
-@functools.partial(jax.vmap, in_axes=[0, 0, 0, None, None], out_axes=0)
+# @functools.partial(jax.vmap, in_axes=[0, 0, 0, None, None, None], out_axes=0)
+# def simulate2(
+#     rng_key: chex.PRNGKey,
+#     tree: Tree,
+#     sims_done: chex.Array,   # (B,)   current #simulations / game
+#     active_explorer_mask: chex.Array  # (M)
+#     action_selection_fn: base.InteriorActionSelectionFn,
+#     max_depth: int,
+#     *,
+
+#     root: base.RootFnOutput,
+#     top_m: int = 16) -> Tuple[chex.Array, chex.Array]:
+#   """Traverses the tree until reaching an unvisited action or `max_depth`.
+
+#   Each simulation starts from the root and keeps selecting actions traversing
+#   the tree until a leaf or `max_depth` is reached.
+
+#   Args:
+#     rng_key: random number generator state, the key is consumed.
+#     tree: _unbatched_ MCTS tree state.
+#     action_selection_fn: function used to select an action during simulation.
+#     max_depth: maximum search tree depth allowed during simulation.
+
+#   Returns:
+#     `(parent_index, action)` tuple, where `parent_index` is the index of the
+#     node reached at the end of the simulation, and the `action` is the action to
+#     evaluate from the `parent_index`.
+#   """
+
+
+#   ### [p]
+#   glogits = tree.extra_data.glogits
+#   _, top_root_actions = jax.lax.top_k(glogits, top_m)     # [B, 16]
+#   root_children_idxs = jnp.arange(top_m, dtype=jnp.int32) + 1
+#   depths = jnp.ones_like(node_idxs)
+
+
+#   root_children_keys = jax.random.split(rng_key, top_m)
+
+#   # Returning multiple node indices w/ size [m] with size [m] actions tensor.
+#   # The action can be already visited, if the max_depth is reached.
+#   return simulate_root_child(root_children_keys, tree, top_root_actions, root_children_idxs, depths, action_selection_fn, max_depth)
+
+
+# -- Parallel simulator --------------------------------------------------------
+#
+#  • active_explorer_mask[b, m] == -1  →  explorer m is idle in game b
+#  • active_explorer_mask[b, m] >=  0  →  explorer m is live and should advance
+#
+#  We run an independent tree-traversal for *every* root-child explorer
+#  (there are `top_m == M` of them).  Idle explorers just emit NO_PARENT.
+#
+@functools.partial(
+    jax.vmap,                       # batch-vectorise over games
+    in_axes=(0, 0, 0, 0, None, None),   # rng, tree, sims_done, mask are batched
+    out_axes=(0, 0))                    # outputs → [B, M]
 def simulate2(
     rng_key: chex.PRNGKey,
     tree: Tree,
-    sims_done: chex.Array,   # (B,)   current #simulations / game
-    active_mask: chex.Array  # (B, M)
+    sims_done: chex.Array,              # (B,)  – unused here but kept for API
+    active_explorer_mask: chex.Array,   # (B, M) after vmap ⇒ (M) here
     action_selection_fn: base.InteriorActionSelectionFn,
     max_depth: int,
     *,
+    root: base.RootFnOutput,            # not needed inside function
+    top_m: int = 16                     # == M
+) -> Tuple[chex.Array, chex.Array]:
+  """
+  Runs one simulation for every *active* root-child explorer.
 
-    root: base.RootFnOutput,
-    top_m: int = 16) -> Tuple[chex.Array, chex.Array]:
-  """Traverses the tree until reaching an unvisited action or `max_depth`.
-
-  Each simulation starts from the root and keeps selecting actions traversing
-  the tree until a leaf or `max_depth` is reached.
-
-  Args:
-    rng_key: random number generator state, the key is consumed.
-    tree: _unbatched_ MCTS tree state.
-    action_selection_fn: function used to select an action during simulation.
-    max_depth: maximum search tree depth allowed during simulation.
-
-  Returns:
-    `(parent_index, action)` tuple, where `parent_index` is the index of the
-    node reached at the end of the simulation, and the `action` is the action to
-    evaluate from the `parent_index`.
+  Returns
+  -------
+  parent_index : int32[ M ]   – parent node where rollout stopped
+  action       : int32[ M ]   – action to expand from that parent
+                               (both are Tree.NO_PARENT for idle explorers)
   """
 
+  # -- 1. Identify the top-M root actions (per game) --------------------------
+  #     We use the log-policy stored in extra_data for that game.
+  glogits           = tree.extra_data.glogits                    # (A,)
+  _, root_actions   = jax.lax.top_k(glogits, top_m)              # (M,)
 
-  ### [p]
-  glogits = tree.extra_data.glogits
-  _, top_root_actions = jax.lax.top_k(glogits, top_m)     # [B, 16]
-  root_children_idxs = jnp.arange(top_m, dtype=jnp.int32) + 1
-  depths = jnp.ones_like(node_idxs)
+  # -- 2. Boolean mask of live explorers -------------------------------------
+  active            = active_explorer_mask != -1                 # (M,)
+
+  # -- 3. Prepare per-explorer start nodes, depths & keys --------------------
+  start_nodes       = jnp.arange(1, top_m + 1, dtype=jnp.int32)  # node 1…M
+  depths            = jnp.ones((top_m,), dtype=jnp.int32)        # depth = 1
+  subkeys           = jax.random.split(rng_key, top_m)           # (M,)
+
+  # -- 4. Roll out every explorer in parallel -------------------------------
+  #     simulate_root_child is already vmapped over axis 0.
+  parent_idx, act = simulate_root_child(
+      subkeys,
+      tree,
+      active,           # <- pass boolean mask third
+      root_actions,     # <- now fourth
+      start_nodes,
+      depths,
+      action_selection_fn,
+      max_depth)
 
 
-  root_children_keys = jax.random.split(rng_key, top_m)
+  # -- 5. Mask-out idle explorers -------------------------------------------
+  parent_idx = jnp.where(active, parent_idx, Tree.NO_PARENT)
+  act        = jnp.where(active, act,    Tree.NO_PARENT)
 
-  # Returning multiple node indices w/ size [m] with size [m] actions tensor.
-  # The action can be already visited, if the max_depth is reached.
-  return simulate_root_child(root_children_keys, tree, top_root_actions, root_children_idxs, depths, action_selection_fn, max_depth)
+  return parent_idx.astype(jnp.int32), act.astype(jnp.int32)
 
 
 def expand2(
