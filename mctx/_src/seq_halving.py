@@ -230,12 +230,13 @@ def get_active_explorer_table(
 def get_num_active_explorers_table(
     max_m: int,
     num_sim: int,
-    p: int
 ) -> jnp.ndarray:
   """
   Pure-Python / tuple implementation (no JAX ops, no tracers).
   Returns   active[m, g]  ∈ ℤ  with shape  (max_m+1, num_sim).
   """
+  p = max_m
+
   # ---- 1. table of considered visits (tuple of tuples) -------------------
   considered: Tuple[Tuple[int, ...], ...] = get_table_of_considered_visits(
       max_m, num_sim)                       # shape (max_m+1, num_sim)
@@ -267,3 +268,4 @@ def get_num_active_explorers_table(
   # ---- 3. Convert to DeviceArray (constant in the compiled graph) --------
   table = jnp.asarray(active, dtype=jnp.int32)
   table = jnp.sum(table, axis=-1)
+  return table
