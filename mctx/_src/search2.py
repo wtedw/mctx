@@ -346,7 +346,7 @@ def search2(
     tree, sims, round, _rng_key = loop_state
     # [todo] what about cases where M is greater than sim?
     # return ~jnp.all(sims >= num_simulations)
-    return round < 1
+    return round < 2
 
   # def body_fun(sim, loop_state):
   def body_fun(loop_state):
@@ -365,6 +365,12 @@ def search2(
     parent_index, action = simulate2(
         simulate_keys, tree, sims, active_explorer_mask, action_selection_fn, max_depth, root=root) # [B,M] for both, -1 if inactive explorer
 
+
+    jax.debug.print("[sim] num_valid_actions: {}", num_valid_actions)
+    jax.debug.print("[sim] num_considered: {}", num_considered)
+    jax.debug.print("[sim] round_i: {}", round_i)
+    jax.debug.print("[sim] active_explorer_mask: {}", active_explorer_mask)
+    jax.debug.print("[sim] active_explorer_table: {}", active_explorer_table)
     jax.debug.print("[sim] parent indx: {}, action: {}", parent_index, action)
     # A node first expanded on simulation `i`, will have node index `i`.
     # Node 0 corresponds to the root node.
@@ -403,7 +409,7 @@ def search2(
 
   # search tree, total sims expanded, round index, rng
 
-  init_carry = (tree, total_sims, 0, rng_key)
+  init_carry = (tree, total_sims, 1, rng_key)
   jax.debug.print("total sims2?: {}", total_sims)
   # total_sims = jnp.full_like(total_sims, fill_value=16)
 
