@@ -305,7 +305,10 @@ def update_active_mask(
   """
   # 2) -----------------------   scorer for **currently live** buckets ------
   # gather the M children we have buckets for
+  jax.debug.print("[halv]active_explorer_mask: {}", active_explorer_mask)
+  jax.debug.print("[halv]sampled_glogits: {}", sampled_glogits)
   score_m = jnp.where(active_explorer_mask, sampled_glogits, -jnp.inf)
+  jax.debug.print("[halv]score_m: {}", score_m)
 
   def root_explorer_layer_qtransform(q1):
     """
@@ -331,6 +334,8 @@ def update_active_mask(
   # This will happen when we do top_k with masked_score
   explorer_cqvalues = root_explorer_layer_qtransform(explorer_qvalues)
   masked_score = score_m + explorer_cqvalues
+  jax.debug.print("[halv]explorer_cqvalues: {}", explorer_cqvalues)
+  jax.debug.print("[halv]masked_score: {}", masked_score)
 
   def select_k_best_static(scores: jnp.ndarray,   # [B, M]
                          k_alive: jnp.ndarray,  # [B] – runtime 0‥M
@@ -346,6 +351,7 @@ def update_active_mask(
     M = max_explorers
     # 1) fixed-K top-k
     _, idx_full = jax.lax.top_k(scores, M)          # [B, M]  static
+    jax.debug.print("[halv] idx_full: {}", idx_full)
 
     # 2) build a per-row mask  mask[b, j] = 1  if j < k_alive[b]
     print("k alive shape", k_alive.shape)
@@ -366,7 +372,7 @@ def update_active_mask(
     # 3) OR-reduce along the “j” axis  → bool [B, M]
     #    (only one True per column can survive)
     # ------------------------------------------------------------------
-    return jnp.any(one_hot, axis=1)
+    return jnp.any(one_hot, axis=0)
 
 
   active_mask_next = jax.vmap(select_k_best_static)(masked_score, k_alive)
