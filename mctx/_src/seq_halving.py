@@ -267,5 +267,5 @@ def get_num_active_explorers_table(
 
   # ---- 3. Convert to DeviceArray (constant in the compiled graph) --------
   table = jnp.asarray(active, dtype=jnp.int32)
-  table = jnp.sum(table, axis=-1)
+  table = jnp.sum(table != -1, axis=-1)
   return table
