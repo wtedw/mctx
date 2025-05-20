@@ -311,6 +311,44 @@ def set_rows_anydtype(
   # --- 5. cast back to original dtype  ------------------------------------
   return out_f32.astype(x.dtype)
 
+def set_rows_anydtype_masked(
+    x:   jnp.ndarray,      # [B, N, …F]
+    idx: jnp.ndarray,      # [B, K]      – row indices
+    val: jnp.ndarray,      # [B, K, …F]  – replacement rows
+    mask: jnp.ndarray,     # [B, K] bool – True ⇔ write this row
+) -> jnp.ndarray:
+  """
+  Scatter-free multi-row update that
+
+    • preserves dtype  (bool / int{8,16,32,64} / float{16,32,64})
+    • uses only mul / add in the inner kernel (TPU-friendly)
+    • ignores rows whose `mask[b,k]` is False – nothing is written there
+      and the arithmetic still has *static* shapes.
+  """
+  B, N = x.shape[:2]
+  F    = x.shape[2:]            # trailing feature dims
+  K    = idx.shape[1]
+
+  # 1) one-hot over rows  … dtype=float32 so that mul/add is legal
+  oh   = jax.nn.one_hot(idx, N, dtype=jnp.float32)        # [B,K,N]
+  oh   = oh * mask[..., None]                             # disable masked rows
+  oh   = oh.reshape((B, K, N) + (1,) * len(F))            # [B,K,N,1…F]
+
+  # 2) cast operands once
+  x_f32   = x.astype(jnp.float32)
+  val_f32 = val.astype(jnp.float32).reshape((B, K, 1) + F)
+
+  # 3) arithmetic blend
+  inserted  = jnp.sum(oh * val_f32, axis=1)               # [B,N,…]
+  any_mask  = jnp.minimum(jnp.sum(oh, axis=1), 1.0)       # [B,N,…]
+  out_f32   = x_f32 * (1.0 - any_mask) + inserted
+  # 4) cast back   (see note below)
+  if jnp.issubdtype(x.dtype, jnp.bool_):
+    return out_f32.astype(bool)           # strict 0/1 → False/True
+  else:
+    return out_f32.astype(x.dtype)
+
+
 def update_active_mask(
     active_explorer_mask,
     sampled_glogits,
@@ -645,7 +683,7 @@ def search2(
 
     jax.debug.print("next_node_idxs: {}", next_node_idxs)
     tree = expand3(
-        params, expand_key, tree, recurrent_fn, parent_idxs, actions, next_node_idxs)
+        params, expand_key, tree, active_mask, recurrent_fn, parent_idxs, actions, next_node_idxs)
     # tree = backward2(tree, next_node_index)
     loop_state = (tree, active_mask, sims, round_i + 1, rng_key)
     return loop_state
@@ -794,6 +832,7 @@ def expand3(
     params: chex.Array,
     rng_key: chex.PRNGKey,
     tree: Tree[T],
+    active_mask: chex.Array,      # [B, M]
     recurrent_fn: base.RecurrentFn,
     parent_idxs: chex.Array,      # [B, M]
     actions: chex.Array,          # [B, M]
@@ -890,11 +929,12 @@ def expand3(
   # 4. node statistics & embeddings (also rank-2 / rank-≥3 updates)    #
   # ------------------------------------------------------------------ #
   tree = update_tree_node_multi(
-      tree,
-      next_node_idxs,              # [B, M]
-      step.prior_logits,           # [B, M, A]
-      step.value,                  # [B, M]
-      emb_new)                     # pytree with leaves [B, M, …]
+    tree,
+    next_node_idxs,
+    step.prior_logits,   # [B,M,A]
+    step.value,          # [B,M]
+    emb_new,             # pytree [B,M,…]
+    active_mask)         # bool [B,M]
 
 
   return tree
@@ -1137,85 +1177,142 @@ def update_tree_node(
 
   return tree.replace(**updates)
 
+# def update_tree_node_multi(
+#     tree: Tree[T],
+#     node_indices: chex.Array,      # [B, K]
+#     prior_logits: chex.Array,      # [B, K, num_actions]
+#     values: chex.Array,            # [B, K]
+#     new_embeds: chex.Array,        # [B, K, ...]
+# ) -> Tree[T]:
+#   """Scatter-free update of K nodes per batch element in the Tree."""
+#   B, K = node_indices.shape
+#   num_actions = tree.num_actions
+
+#   # --- 1) update children_prior_logits: shape [B, N, A] ---
+#   cpl = set_rows(
+#       tree.children_prior_logits,     # [B, N, A]
+#       node_indices,                   # [B, K]
+#       prior_logits                    # [B, K, A]
+#   )
+
+#   # --- 2) update raw_values & node_values: [B, N] ---
+#   rv = set_rows(
+#       tree.raw_values[..., None],     # make float 3D [B, N, 1]
+#       node_indices,                   # [B, K]
+#       values[..., None]               # [B, K, 1]
+#   )[..., 0]                          # back to [B, N]
+
+#   nv = set_rows(
+#       tree.node_values[..., None],
+#       node_indices,
+#       values[..., None]
+#   )[..., 0]
+
+#   # --- 3) update node_visits: increment old visits by 1 at each index ---
+#   # gather old visits at each new node
+#   old_visits = jnp.take_along_axis(
+#       tree.node_visits, node_indices, axis=1)   # [B, K]
+#   new_visits = old_visits + 1
+#   # nvst = set_rows(
+#   #     tree.node_visits[..., None],
+#   #     node_indices,
+#   #     new_visits[..., None]
+#   # )[..., 0]
+
+#   nvst = set_rows_anydtype(          # <- keeps the original dtype
+#       tree.node_visits,              # int32
+#       node_indices,                  # [B, K]
+#       new_visits                     # [B, K] int32
+#   )
+
+#   # --- 4) update all embedding leaves safely ---------------------------------
+#   def _update_leaf(path, old_leaf, new_leaf):
+#     print(f"[update_tree_multi][{path}]: {old_leaf.dtype}, {new_leaf.dtype}")
+#     """Scatter-free multi-row update that keeps the original dtype."""
+#     if not isinstance(old_leaf, jnp.ndarray):
+#       # non-array leaves (objects, None, etc.) – leave untouched
+#       return old_leaf
+#     else:
+#       return set_rows_anydtype_masked(old_leaf, node_indices, new_leaf)
+
+#   # updated_embeddings = jax.tree_map(
+#   updated_embeddings = jax.tree.map_with_path(
+#       _update_leaf,          # <- fn(old, new) keeps dtype
+#       tree.embeddings,       # old leaves
+#       new_embeds             # corresponding new leaves
+#   )
+
+#   # emb = set_rows_arith(
+#   #     tree.embeddings,                # [B, N, ...]
+#   #     node_indices,                   # [B, K]
+#   #     embeddings                      # [B, K, ...]
+#   # )
+
+#   return tree.replace(
+#       children_prior_logits=cpl,
+#       raw_values=rv,
+#       node_values=nv,
+#       node_visits=nvst,
+#       # embeddings=embeddings,
+#       embeddings=updated_embeddings,
+#   )
+
+
 def update_tree_node_multi(
     tree: Tree[T],
-    node_indices: chex.Array,      # [B, K]
-    prior_logits: chex.Array,      # [B, K, num_actions]
-    values: chex.Array,            # [B, K]
-    new_embeds: chex.Array,        # [B, K, ...]
+    node_indices:    jnp.ndarray,   # [B, K]
+    prior_logits:    jnp.ndarray,   # [B, K, A]
+    values:          jnp.ndarray,   # [B, K]
+    new_embeds:      Any,           # pytree with leaves [B, K, …]
+    active_mask:     jnp.ndarray,   # [B, K]  bool   ← NEW!
 ) -> Tree[T]:
-  """Scatter-free update of K nodes per batch element in the Tree."""
+  """Masked scatter-free update for K leaf nodes per batch element."""
   B, K = node_indices.shape
-  num_actions = tree.num_actions
+  A = tree.num_actions
 
-  # --- 1) update children_prior_logits: shape [B, N, A] ---
-  cpl = set_rows(
-      tree.children_prior_logits,     # [B, N, A]
-      node_indices,                   # [B, K]
-      prior_logits                    # [B, K, A]
-  )
+  # --- children_prior_logits ----------------------------------------------
+  cpl = set_rows_anydtype_masked(tree.children_prior_logits,
+                                 node_indices,
+                                 prior_logits,
+                                 active_mask)
 
-  # --- 2) update raw_values & node_values: [B, N] ---
-  rv = set_rows(
-      tree.raw_values[..., None],     # make float 3D [B, N, 1]
-      node_indices,                   # [B, K]
-      values[..., None]               # [B, K, 1]
-  )[..., 0]                          # back to [B, N]
+  # --- raw_values / node_values -------------------------------------------
+  rv = set_rows_anydtype_masked(tree.raw_values,
+                                node_indices,
+                                values,
+                                active_mask)
+  nv = set_rows_anydtype_masked(tree.node_values,
+                                node_indices,
+                                values,
+                                active_mask)
 
-  nv = set_rows(
-      tree.node_values[..., None],
-      node_indices,
-      values[..., None]
-  )[..., 0]
+  # --- node_visits (increment only when active) ---------------------------
+  inc   = active_mask.astype(tree.node_visits.dtype)      # [B,K] 0/1
+  old   = jnp.take_along_axis(tree.node_visits,
+                              node_indices, axis=1)       # [B,K]
+  new   = old + inc
+  nvst  = set_rows_anydtype_masked(tree.node_visits,
+                                   node_indices,
+                                   new,
+                                   active_mask)
 
-  # --- 3) update node_visits: increment old visits by 1 at each index ---
-  # gather old visits at each new node
-  old_visits = jnp.take_along_axis(
-      tree.node_visits, node_indices, axis=1)   # [B, K]
-  new_visits = old_visits + 1
-  # nvst = set_rows(
-  #     tree.node_visits[..., None],
-  #     node_indices,
-  #     new_visits[..., None]
-  # )[..., 0]
-
-  nvst = set_rows_anydtype(          # <- keeps the original dtype
-      tree.node_visits,              # int32
-      node_indices,                  # [B, K]
-      new_visits                     # [B, K] int32
-  )
-
-  # --- 4) update all embedding leaves safely ---------------------------------
-  def _update_leaf(path, old_leaf, new_leaf):
-    print(f"[update_tree_multi][{path}]: {old_leaf.dtype}, {new_leaf.dtype}")
-    """Scatter-free multi-row update that keeps the original dtype."""
+  # --- embeddings ----------------------------------------------------------
+  def _upd(path, old_leaf, new_leaf):
     if not isinstance(old_leaf, jnp.ndarray):
-      # non-array leaves (objects, None, etc.) – leave untouched
       return old_leaf
-    else:
-      return set_rows_anydtype(old_leaf, node_indices, new_leaf)
+    return set_rows_anydtype_masked(old_leaf, node_indices, new_leaf,
+                                    active_mask)
 
-  # updated_embeddings = jax.tree_map(
-  updated_embeddings = jax.tree.map_with_path(
-      _update_leaf,          # <- fn(old, new) keeps dtype
-      tree.embeddings,       # old leaves
-      new_embeds             # corresponding new leaves
-  )
+  updated_embeddings = jax.tree.map_with_path(_upd,
+                                              tree.embeddings,
+                                              new_embeds)
 
-  # emb = set_rows_arith(
-  #     tree.embeddings,                # [B, N, ...]
-  #     node_indices,                   # [B, K]
-  #     embeddings                      # [B, K, ...]
-  # )
-
-  return tree.replace(
-      children_prior_logits=cpl,
-      raw_values=rv,
-      node_values=nv,
-      node_visits=nvst,
-      # embeddings=embeddings,
-      embeddings=updated_embeddings,
-  )
+  # --- replace & return ----------------------------------------------------
+  return tree.replace(children_prior_logits=cpl,
+                      raw_values=rv,
+                      node_values=nv,
+                      node_visits=nvst,
+                      embeddings=updated_embeddings)
 
 
 def instantiate_tree_from_root(
