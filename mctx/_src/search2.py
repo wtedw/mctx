@@ -278,9 +278,38 @@ def set_rows(
   # 5) blend old and new purely with arithmetic
   return x * (1 - any_mask) + inserted * any_mask
 
+def set_rows_anydtype(
+    x:   jnp.ndarray,    # [B, N, ...F]  – bool / int / float
+    idx: jnp.ndarray,    # [B, K]        – rows to overwrite
+    val: jnp.ndarray,    # [B, K, ...F]  – replacement rows
+) -> jnp.ndarray:
+  """
+  Scatter-free multi-row update that:
+    • works for bool, integers, floats
+    • uses only multiply/add inside the kernel (good for TPUs)
+    • performs *one* cast to f32 and *one* cast back.
+  """
+  B, N = x.shape[:2]
+  F_shape = x.shape[2:]
+  K = idx.shape[1]
 
+  # --- 1. build float32 one-hot mask  m[b,k,n] ∈ {0,1} --------------------
+  mask = jax.nn.one_hot(idx, N, dtype=jnp.float32)                 # [B,K,N]
+  mask = mask.reshape((B, K, N) + (1,) * len(F_shape))             # [B,K,N,1…]
 
+  # --- 2. cast inputs to f32 once -----------------------------------------
+  x_f32   = x.astype(jnp.float32)
+  val_f32 = val.astype(jnp.float32).reshape((B, K, 1) + F_shape)
 
+  # --- 3. aggregate K updates & build  any_mask[b,n,…] ∈ {0,1} -----------
+  inserted  = jnp.sum(mask * val_f32, axis=1)                       # [B,N,…]
+  any_mask  = jnp.minimum(jnp.sum(mask, axis=1), 1.0)               # [B,N,…]
+
+  # --- 4. blend with pure arithmetic in f32 -------------------------------
+  out_f32 = x_f32 * (1.0 - any_mask) + inserted                     # [B,N,…]
+
+  # --- 5. cast back to original dtype  ------------------------------------
+  return out_f32.astype(x.dtype)
 
 def update_active_mask(
     active_explorer_mask,
@@ -615,9 +644,8 @@ def search2(
                                 active_unvisited_node_idxs, next_node_idxs)
 
     jax.debug.print("next_node_idxs: {}", next_node_idxs)
-    # tree = expand2(
-    #     params, expand_key, tree, recurrent_fn, parent_index,
-    #     action, next_node_index)
+    tree = expand3(
+        params, expand_key, tree, recurrent_fn, parent_idxs, actions, next_node_idxs)
     # tree = backward2(tree, next_node_index)
     loop_state = (tree, active_mask, sims, round_i + 1, rng_key)
     return loop_state
@@ -762,8 +790,116 @@ def simulate2(
 
   return parent_idx.astype(jnp.int32), act.astype(jnp.int32), next_node_idx.astype(jnp.int32)
 
+def expand3(
+    params: chex.Array,
+    rng_key: chex.PRNGKey,
+    tree: Tree[T],
+    recurrent_fn: base.RecurrentFn,
+    parent_idxs: chex.Array,      # [B, M]
+    actions: chex.Array,          # [B, M]
+    next_node_idxs: chex.Array,   # [B, M]
+) -> Tree[T]:
+  """Expand *all* (B×M) <parent, action> pairs in parallel.
 
-def expand2(
+  • `parent_idxs[b, m]`   – parent node to expand from
+  • `actions[b, m]`       – action taken from that parent
+  • `next_node_idxs[b, m]`– fresh node id (if UNVISITED) *or*
+                            the already-existing child id
+
+  All three tensors have exactly the same static shape `[B, M]`
+  (there is **no** branch on “active vs. inactive” inside this routine).
+  """
+  B, M          = parent_idxs.shape
+  K             = B * M                              # total leaves
+  A             = tree.children_index.shape[-1]      # #actions
+  N             = tree.children_index.shape[1]       # #rows (nodes)
+
+  chex.assert_shape([parent_idxs, actions, next_node_idxs], (B,M))
+
+  # ------------------------------------------------------------------ #
+  # 1. gather the embeddings of **all** parents in one shot            #
+  # batch_flat looks like
+  # > jnp.repeat(jnp.arange(2), 4)
+  # > Array([0, 0, 0, 0, 1, 1, 1, 1], dtype=int32)
+  # ------------------------------------------------------------------ #
+  batch_flat    = jnp.repeat(jnp.arange(B), M)       # [K]
+  parent_flat   = parent_idxs.reshape(-1)            # [K]
+  emb_flat      = jax.tree_map(
+      lambda x: x[batch_flat, parent_flat],          # -> [K, …]
+      tree.embeddings)
+
+  # RNG for every leaf
+  rng_keys      = jax.random.split(rng_key, K)
+
+  # model inference on all leaves
+  action_flat   = actions.reshape(-1)
+  step_flat, emb_new_flat = recurrent_fn(
+      params, rng_keys, action_flat, emb_flat)
+
+  # reshape back to [B, M, …] for convenience
+  step      = jax.tree_map(lambda t: t.reshape(B, M, *t.shape[1:]), step_flat)
+  emb_new   = jax.tree_map(lambda t: t.reshape(B, M, *t.shape[1:]), emb_new_flat)
+
+  # conveniences
+  dtype_idx = tree.children_index.dtype
+  dtype_flt = tree.children_rewards.dtype   # rewards / discounts share dtype
+
+  # ------------------------------------------------------------------ #
+  # 2. rank-3 tables: children_{index|rewards|discounts}                #
+  # ------------------------------------------------------------------ #
+  # (B,M,N,A) boolean mask that marks exactly the cells we want to write
+  m_row     = jax.nn.one_hot(parent_idxs, N, dtype=dtype_flt)          # [B,M,N]
+  m_col     = jax.nn.one_hot(actions,     A, dtype=dtype_flt)          # [B,M,A]
+  mask_3d   = m_row[..., None] * m_col[..., None, :]                  # [B,M,N,A]
+
+  # collapse the M dimension → [B,N,A]
+  write_mask = jnp.minimum(mask_3d.sum(1), 1)                         # 0/1
+
+  # helper: “blend in” new values wherever write_mask==1
+  def blend(old, new, mask):
+    return old * (1 - mask) + new * mask
+
+  # new values we want to insert
+  new_idx   = (mask_3d * next_node_idxs[..., None, None]).sum(1).astype(dtype_idx)
+  new_rew   = (mask_3d * step.reward   [..., None, None]).sum(1).astype(dtype_flt)
+  new_disc  = (mask_3d * step.discount [..., None, None]).sum(1).astype(dtype_flt)
+
+  tree = tree.replace(
+      children_index     = blend(tree.children_index,
+                                 new_idx,   write_mask.astype(dtype_idx)),
+      children_rewards   = blend(tree.children_rewards,
+                                 new_rew,   write_mask),
+      children_discounts = blend(tree.children_discounts,
+                                 new_disc,  write_mask),
+  )
+
+  # ------------------------------------------------------------------ #
+  # 3. rank-2 tables: parents, action_from_parent                      #
+  # ------------------------------------------------------------------ #
+  # we already have generic multi-row helpers → just call them
+  tree = tree.replace(
+      parents            = set_rows(tree.parents[..., None],
+                                    next_node_idxs,
+                                    parent_idxs)[..., 0].astype(tree.parents.dtype),
+      action_from_parent = set_rows(tree.action_from_parent[..., None],
+                                    next_node_idxs,
+                                    actions)[..., 0].astype(tree.action_from_parent.dtype),
+  )
+
+  # ------------------------------------------------------------------ #
+  # 4. node statistics & embeddings (also rank-2 / rank-≥3 updates)    #
+  # ------------------------------------------------------------------ #
+  tree = update_tree_node_multi(
+      tree,
+      next_node_idxs,              # [B, M]
+      step.prior_logits,           # [B, M, A]
+      step.value,                  # [B, M]
+      emb_new)                     # pytree with leaves [B, M, …]
+
+
+  return tree
+
+def old_expand2(
     params: chex.Array,
     rng_key: chex.PRNGKey,
     tree: Tree[T],
@@ -1037,29 +1173,33 @@ def update_tree_node_multi(
   old_visits = jnp.take_along_axis(
       tree.node_visits, node_indices, axis=1)   # [B, K]
   new_visits = old_visits + 1
-  nvst = set_rows(
-      tree.node_visits[..., None],
-      node_indices,
-      new_visits[..., None]
-  )[..., 0]
+  # nvst = set_rows(
+  #     tree.node_visits[..., None],
+  #     node_indices,
+  #     new_visits[..., None]
+  # )[..., 0]
 
-  # --- 4) update embeddings: shape [B, N, ...] ---
-  # embeddings = jax.tree_map(
-  #     lambda emb_leaf: set_rows(    # your arithmetic-only helper
-  #         emb_leaf,                      # [B, N, ...F]
-  #         node_indices,                  # [B, K]
-  #         new_embeds                 # [B, K, ...F]
-  #     ),
-  #     tree.embeddings
-  # )
-  # 4) scatter‐free multi‐row update of every embedding leaf:
-  updated_embeddings = jax.tree_map(
-      lambda emb_leaf: set_rows(
-          emb_leaf,           # [B, N, ...F]
-          node_indices,       # [B, K]
-          new_embeds          # [B, K, ...F]   <-- use this!
-      ),
-      tree.embeddings
+  nvst = set_rows_anydtype(          # <- keeps the original dtype
+      tree.node_visits,              # int32
+      node_indices,                  # [B, K]
+      new_visits                     # [B, K] int32
+  )
+
+  # --- 4) update all embedding leaves safely ---------------------------------
+  def _update_leaf(path, old_leaf, new_leaf):
+    print(f"[update_tree_multi][{path}]: {old_leaf.dtype}, {new_leaf.dtype}")
+    """Scatter-free multi-row update that keeps the original dtype."""
+    if not isinstance(old_leaf, jnp.ndarray):
+      # non-array leaves (objects, None, etc.) – leave untouched
+      return old_leaf
+    else:
+      return set_rows_anydtype(old_leaf, node_indices, new_leaf)
+
+  # updated_embeddings = jax.tree_map(
+  updated_embeddings = jax.tree.map_with_path(
+      _update_leaf,          # <- fn(old, new) keeps dtype
+      tree.embeddings,       # old leaves
+      new_embeds             # corresponding new leaves
   )
 
   # emb = set_rows_arith(
