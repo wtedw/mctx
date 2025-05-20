@@ -1049,6 +1049,95 @@ def old_expand2(
 
 
 @jax.vmap
+def backward3(
+    tree: Tree[T], # [B, N, ...] but vmapped to [N, ...]
+    leaf_idxs: chex.Array, # [B, M] but vmapped to [M],
+    active_masks: chex.Array, # [B, M] but vmapped to [M],
+    root_child_node_idxs: chex.Array, # [B, M] = jnp.arange(1, M) for every B
+) -> Tree[T]:
+  """Goes up and updates the tree until all nodes reached the root.
+
+  Args:
+    tree: the MCTS tree state to update, without the batch size.
+    leaf_index: the node index from which to do the backward.
+
+  Returns:
+    Updated MCTS tree state.
+  """
+  tree = backward_explorer(tree, leaf_idxs, active_mask, root_child_node_idxs)
+
+  return tree
+
+
+
+@functools.partial(
+    jax.vmap,
+    in_axes=(None, 0, 0),
+    # out_axes=(...)) # does this need to be set somehow?
+)
+def backward_explorer(
+    tree, # [N, ...] Every M root explorer needs to know about all the N nodes for a game in B
+    leaf_index, # ()
+    is_active, # ()
+    root_child_node_idx, # ()
+) -> Tree[T]:
+  """Goes up and updates the tree until all nodes reached the root.
+
+  Args:
+    tree: the MCTS tree state to update, without the batch size.
+    leaf_index: the node index from which to do the backward.
+
+  Returns:
+    Updated MCTS tree state.
+  """
+
+  def cond_fun(loop_state):
+    _, _, index = loop_state
+    return is_active and index != root_child_node_idx
+
+  def body_fun(loop_state):
+    # Here we update the value of our parent, so we start by reversing.
+    tree, leaf_value, index = loop_state
+    parent = tree.parents[index]
+    count = tree.node_visits[parent]
+    action = tree.action_from_parent[index]
+    reward = tree.children_rewards[parent, action]
+    leaf_value = reward + tree.children_discounts[parent, action] * leaf_value
+    parent_value = (
+        tree.node_values[parent] * count + leaf_value) / (count + 1.0)
+    children_values = tree.node_values[index]
+    children_counts = tree.children_visits[parent, action] + 1
+
+    tree = tree.replace(
+        # rank‑3 scalar updates
+        children_visits  = set_cell(tree.children_visits,
+                                    parent, action, children_counts),
+        children_values  = set_cell(tree.children_values,
+                                    parent, action, children_values),
+
+        # rank‑2 updates
+        node_values = set_row(tree.node_values, parent, parent_value),
+        node_visits = set_row(tree.node_visits, parent, count + 1),
+    )
+
+    # tree = tree.replace(
+    #     node_values=update(tree.node_values, parent_value, parent),
+    #     node_visits=update(tree.node_visits, count + 1, parent),
+    #     children_values=update(
+    #         tree.children_values, children_values, parent, action),
+    #     children_visits=update(
+    #         tree.children_visits, children_counts, parent, action))
+
+    return tree, leaf_value, parent
+
+  leaf_index = jnp.asarray(leaf_index, dtype=jnp.int32)
+  loop_state = (tree, tree.node_values[leaf_index], leaf_index)
+  tree, _, _ = jax.lax.while_loop(cond_fun, body_fun, loop_state)
+
+  return tree
+
+
+@jax.vmap
 def backward2(
     tree: Tree[T],
     leaf_index: chex.Numeric) -> Tree[T]:
