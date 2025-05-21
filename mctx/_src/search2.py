@@ -1136,94 +1136,94 @@ def _zeros_like_tree(t: Tree) -> Tree:
   """Return a Tree-shaped pytree whose leaves are zeros_like the input."""
   return jax.tree_util.tree_map(jnp.zeros_like, t)
 
-def backward_explorer(tree: Tree,
-                      leaf_idx_vec:  jnp.ndarray,   # (M,)
-                      active_mask:   jnp.ndarray,   # (M,)  bool
-                      root_child_ids:jnp.ndarray    # (M,)  int32
-                     ) -> Tree:
-  """
-  • Handles *all* M root-child explorers in one shot (no vmap here).
-  • Returns a `delta_tree` whose leaves contain only increments / diffs.
-  • Explorers with `active_mask == False` never add anything.
-  """
-  M, N, A = (leaf_idx_vec.shape[0],
-             tree.node_values.shape[0],
-             tree.children_values.shape[-1])
+# def backward_explorer(tree: Tree,
+#                       leaf_idx_vec:  jnp.ndarray,   # (M,)
+#                       active_mask:   jnp.ndarray,   # (M,)  bool
+#                       root_child_ids:jnp.ndarray    # (M,)  int32
+#                      ) -> Tree:
+#   """
+#   • Handles *all* M root-child explorers in one shot (no vmap here).
+#   • Returns a `delta_tree` whose leaves contain only increments / diffs.
+#   • Explorers with `active_mask == False` never add anything.
+#   """
+#   M, N, A = (leaf_idx_vec.shape[0],
+#              tree.node_values.shape[0],
+#              tree.children_values.shape[-1])
 
-  delta_tree = _zeros_like_tree(tree)                 # start with zeros
+#   delta_tree = _zeros_like_tree(tree)                 # start with zeros
 
-  # ---------- while-loop ----------------------------------------------------
-  def cond_fun(state):
-    loop_i, idx_vec, *_ = state
-    still_climbing = jnp.logical_and(idx_vec != root_child_ids, idx_vec != Tree.NO_PARENT)
-    any_climbing = jnp.any(jnp.logical_and(active_mask, still_climbing(idx_vec)))
-    jax.debug.print("[backwardz] @{} still_climbing: {}", loop_i, still_climbing)
-    return any_climbing
+#   # ---------- while-loop ----------------------------------------------------
+#   def cond_fun(state):
+#     loop_i, idx_vec, *_ = state
+#     still_climbing = jnp.logical_and(idx_vec != root_child_ids, idx_vec != Tree.NO_PARENT)
+#     any_climbing = jnp.any(jnp.logical_and(active_mask, still_climbing(idx_vec)))
+#     jax.debug.print("[backwardz] @{} still_climbing: {}", loop_i, still_climbing)
+#     return any_climbing
 
-  def body_fun(state):
-    loop_i, idx_vec, leaf_val_vec, dt = state
+#   def body_fun(state):
+#     loop_i, idx_vec, leaf_val_vec, dt = state
 
-    # parents / actions for every explorer ------------------------------
-    par_vec = tree.parents[idx_vec]              # (M,)
-    act_vec = tree.action_from_parent[idx_vec]   # (M,)
+#     # parents / actions for every explorer ------------------------------
+#     par_vec = tree.parents[idx_vec]              # (M,)
+#     act_vec = tree.action_from_parent[idx_vec]   # (M,)
 
-    # -------- mask of *currently* active explorers ---------------------
-    live = jnp.logical_and(active_mask, still_climbing(idx_vec))  # (M,)
+#     # -------- mask of *currently* active explorers ---------------------
+#     live = jnp.logical_and(active_mask, still_climbing(idx_vec))  # (M,)
 
-    # -------- one Euler step of the Bellman backup ---------------------
-    reward   = tree.children_rewards  [par_vec, act_vec]
-    discount = tree.children_discounts[par_vec, act_vec]
-    leaf_val_vec = reward + discount * leaf_val_vec               # (M,)
+#     # -------- one Euler step of the Bellman backup ---------------------
+#     reward   = tree.children_rewards  [par_vec, act_vec]
+#     discount = tree.children_discounts[par_vec, act_vec]
+#     leaf_val_vec = reward + discount * leaf_val_vec               # (M,)
 
-    old_cnt  = tree.node_visits[par_vec]
-    new_cnt  = old_cnt + 1
-    old_val  = tree.node_values[par_vec]
-    new_val  = (old_val * old_cnt + leaf_val_vec) / new_cnt       # (M,)
+#     old_cnt  = tree.node_visits[par_vec]
+#     new_cnt  = old_cnt + 1
+#     old_val  = tree.node_values[par_vec]
+#     new_val  = (old_val * old_cnt + leaf_val_vec) / new_cnt       # (M,)
 
-    # -------- build *masked* increments -------------------------------
-    # helpers: turn scatter → add-at
-    def add_at(arr, idx, val):
-      return arr.at[idx].add(val)
+#     # -------- build *masked* increments -------------------------------
+#     # helpers: turn scatter → add-at
+#     def add_at(arr, idx, val):
+#       return arr.at[idx].add(val)
 
-    # children_* are rank-3; build flat indices first
-    child_vis_delta = dt.children_visits
-    child_val_delta = dt.children_values
-    node_vis_delta  = dt.node_visits
-    node_val_delta  = dt.node_values
+#     # children_* are rank-3; build flat indices first
+#     child_vis_delta = dt.children_visits
+#     child_val_delta = dt.children_values
+#     node_vis_delta  = dt.node_visits
+#     node_val_delta  = dt.node_values
 
-    # only the live explorers contribute
-    par_live, act_live = par_vec[live], act_vec[live]
-    child_vis_delta = child_vis_delta.at[par_live, act_live].add(1)
-    child_val_delta = child_val_delta.at[par_live, act_live].add(
-        tree.node_values[idx_vec[live]] -
-        tree.children_values[par_live, act_live])
+#     # only the live explorers contribute
+#     par_live, act_live = par_vec[live], act_vec[live]
+#     child_vis_delta = child_vis_delta.at[par_live, act_live].add(1)
+#     child_val_delta = child_val_delta.at[par_live, act_live].add(
+#         tree.node_values[idx_vec[live]] -
+#         tree.children_values[par_live, act_live])
 
-    node_vis_delta  = node_vis_delta.at[par_live].add(1)
-    node_val_delta  = node_val_delta.at[par_live].add(
-        new_val[live] - old_val[live])
+#     node_vis_delta  = node_vis_delta.at[par_live].add(1)
+#     node_val_delta  = node_val_delta.at[par_live].add(
+#         new_val[live] - old_val[live])
 
-    dt = dt.replace(children_visits = child_vis_delta,
-                    children_values = child_val_delta,
-                    node_visits     = node_vis_delta,
-                    node_values     = node_val_delta)
+#     dt = dt.replace(children_visits = child_vis_delta,
+#                     children_values = child_val_delta,
+#                     node_visits     = node_vis_delta,
+#                     node_values     = node_val_delta)
 
-    # next indices: live explorers move up; others stay put
-    next_idx_vec = jnp.where(live, par_vec, idx_vec)
+#     # next indices: live explorers move up; others stay put
+#     next_idx_vec = jnp.where(live, par_vec, idx_vec)
 
-    # ---------- debug print once per loop ------------------------------
-    jax.debug.print("[backward] iter={}  live={}  max_idx={}",
-                    loop_i, live, idx_vec.max())
+#     # ---------- debug print once per loop ------------------------------
+#     jax.debug.print("[backward] iter={}  live={}  max_idx={}",
+#                     loop_i, live, idx_vec.max())
 
-    return (loop_i + 1, next_idx_vec, leaf_val_vec, dt)
+#     return (loop_i + 1, next_idx_vec, leaf_val_vec, dt)
 
-  # initial state -----------------------------------------------------------
-  init_state = (0,                      # loop counter
-                leaf_idx_vec,           # (M,)
-                tree.node_values[leaf_idx_vec],   # (M,)
-                delta_tree)
+#   # initial state -----------------------------------------------------------
+#   init_state = (0,                      # loop counter
+#                 leaf_idx_vec,           # (M,)
+#                 tree.node_values[leaf_idx_vec],   # (M,)
+#                 delta_tree)
 
-  *_unused, delta_tree = jax.lax.while_loop(cond_fun, body_fun, init_state)
-  return delta_tree
+#   *_unused, delta_tree = jax.lax.while_loop(cond_fun, body_fun, init_state)
+#   return delta_tree
 
 def backward_explorer(tree: Tree,
                       leaf_idx_vec:  jnp.ndarray,   # (M,)
@@ -1311,6 +1311,16 @@ def backward_explorer(tree: Tree,
                 delta)
 
   *_unused, delta_out = jax.lax.while_loop(cond_fun, body_fun, init_state)
+
+  # Update the root
+  num_active_explorers = jnp.sum(active_mask)
+
+  delta_out = delta_out.replace(
+      node_visits     = delta_out.node_visits.at[Tree.ROOT_INDEX].add(num_active_explorers),
+      # node_values     = d.node_values.at[par].add(live_f * (new_val - old_val))
+  )
+
+
   return delta_out
 
 
