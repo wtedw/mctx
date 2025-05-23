@@ -99,6 +99,15 @@ class GumbelMuZeroExtraData:
 GumbelMuZeroExtraDataType = TypeVar(  # pylint: disable=invalid-name
     "GumbelMuZeroExtraDataType", bound=GumbelMuZeroExtraData)
 
+@chex.dataclass(frozen=True)
+class OptGumbelMuZeroExtraData:
+  """Extra data for Gumbel MuZero search."""
+  root_gumbel: chex.Array
+  glogits: chex.Array
+
+
+OptGumbelMuZeroExtraDataType = TypeVar(  # pylint: disable=invalid-name
+    "OptGumbelMuZeroExtraDataType", bound=OptGumbelMuZeroExtraData)
 
 def gumbel_muzero_root_action_selection(
     rng_key: chex.PRNGKey,
@@ -134,6 +143,8 @@ def gumbel_muzero_root_action_selection(
   chex.assert_equal_shape([visit_counts, prior_logits])
   completed_qvalues = qtransform(tree, node_index)
 
+  jax.debug.print("[OG root_action]@{}, rootcqvalues: {}", node_index, completed_qvalues)
+
   table = jnp.array(seq_halving.get_table_of_considered_visits(
       max_num_considered_actions, num_simulations))
   num_valid_actions = jnp.sum(
@@ -150,6 +161,10 @@ def gumbel_muzero_root_action_selection(
   to_argmax = seq_halving.score_considered(
       considered_visit, gumbel, prior_logits, completed_qvalues,
       visit_counts)
+
+  res = masked_argmax(to_argmax, tree.root_invalid_actions)
+  # jax.debug.print("[OG root_action]@{}, rootto_argmax: {}", node_index, to_argmax)
+  jax.debug.print("[OG root_action]@{}, res: {}", node_index, res)
 
   # Masking the invalid actions at the root.
   return masked_argmax(to_argmax, tree.root_invalid_actions)
@@ -187,11 +202,19 @@ def gumbel_muzero_interior_action_selection(
 
   # The `prior_logits + completed_qvalues` provide an improved policy,
   # because the missing qvalues are replaced by v_{prior_logits}(node).
+
+
+  # jax.debug.print("[OG interior_action]@node{}, prior_logits: {}", node_index, prior_logits)
   to_argmax = _prepare_argmax_input(
       probs=jax.nn.softmax(prior_logits + completed_qvalues),
       visit_counts=visit_counts)
 
   chex.assert_rank(to_argmax, 1)
+
+  jax.debug.print("[OG interior_action]@node{}, cqvalues: {}", node_index, completed_qvalues)
+  jax.debug.print("[OG interior_action]@node{}, res: {}", node_index, jnp.argmax(to_argmax, axis=-1).astype(jnp.int32))
+
+
   return jnp.argmax(to_argmax, axis=-1).astype(jnp.int32)
 
 

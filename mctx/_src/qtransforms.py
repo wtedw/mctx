@@ -252,14 +252,22 @@ def qtransform_completed_by_mix_value(
         prior_probs=prior_probs)
   else:
     value = raw_value
+  jax.debug.print("[OG qtransform]@{}, qvalues: {}", node_index, qvalues)
+  jax.debug.print("[OG qtransform]@{}, visit_counts: {}", node_index, visit_counts)
+  jax.debug.print("[OG qtransform]@{}, value: {}", node_index, value)
   completed_qvalues = _complete_qvalues(
       qvalues, visit_counts=visit_counts, value=value)
 
   # Scaling the Q-values.
   if rescale_values:
     completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
+  jax.debug.print("[OG qtransform2]@{}, completed_qvalues: {}", node_index, completed_qvalues)
   maxvisit = jnp.max(visit_counts, axis=-1)
+  jax.debug.print("[OG qtransform2]@{}, maxvisit: {}", node_index, maxvisit)
   visit_scale = maxvisit_init + maxvisit
+
+  jax.debug.print("[OG qtransform2]@{}, visit_scale: {}", node_index, visit_scale)
+  jax.debug.print("[OG qtransform2]@{}, finqtransform: {}", node_index, visit_scale * value_scale * completed_qvalues)
   return visit_scale * value_scale * completed_qvalues
 
 

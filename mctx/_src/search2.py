@@ -349,7 +349,8 @@ def set_rows_anydtype_masked(
     return out_f32.astype(x.dtype)
 
 
-def update_active_mask(
+def halve_root_actions_mask(
+    round_i,
     active_explorer_mask,
     sampled_glogits,
     explorer_visit_counts,
@@ -357,6 +358,7 @@ def update_active_mask(
     k_alive,
     *,
     max_explorers,
+    use_mixed_value: bool = False,
     value_scale: chex.Numeric = 0.1,
     maxvisit_init: chex.Numeric = 50.0,
     rescale_values: bool = True,
@@ -372,7 +374,9 @@ def update_active_mask(
   """
   # 2) -----------------------   scorer for **currently live** buckets ------
   # gather the M children we have buckets for
-  jax.debug.print("[halv]active_explorer_mask: {}", active_explorer_mask)
+  jax.debug.print("[halv]OG explorer_qvalues@{}: {}", round_i, explorer_qvalues)
+  jax.debug.print("[halv]OG explorer_visit_counts@{}: {}", round_i, explorer_visit_counts)
+  jax.debug.print("[halv]OG active_explorer_mask@{}: {}", round_i, active_explorer_mask)
   # jax.debug.print("[halv]sampled_glogits: {}", sampled_glogits)
   score_m = jnp.where(active_explorer_mask, sampled_glogits, -jnp.inf)
   # jax.debug.print("[halv]score_m: {}", score_m)
@@ -401,8 +405,8 @@ def update_active_mask(
   # This will happen when we do top_k with masked_score
   explorer_cqvalues = root_explorer_layer_qtransform(explorer_qvalues)
   masked_score = score_m + explorer_cqvalues
-  jax.debug.print("[halv]explorer_cqvalues: {}", explorer_cqvalues)
-  jax.debug.print("[halv]masked_score: {}", masked_score)
+  jax.debug.print("[halv]explorer_cqvalues@{}: {}", round_i, explorer_cqvalues)
+  jax.debug.print("[halv]masked_score@{}: {}", round_i, masked_score)
 
   def select_k_best_static(scores: jnp.ndarray,   # [B, M]
                          k_alive: jnp.ndarray,  # [B] – runtime 0‥M
@@ -418,11 +422,11 @@ def update_active_mask(
     M = max_explorers
     # 1) fixed-K top-k
     _, idx_full = jax.lax.top_k(scores, M)          # [B, M]  static
-    jax.debug.print("[halv]top_k, idx_full: {}", idx_full)
+    jax.debug.print("[halv]top_k, idx_full@{}: {}", round_i, idx_full)
 
     # 2) build a per-row mask  mask[b, j] = 1  if j < k_alive[b]
     print("k alive shape", k_alive.shape)
-    jax.debug.print("k alive: {}", k_alive)
+    jax.debug.print("[halv]k alive@{}: {}", round_i, k_alive)
     keep_mask   = jnp.arange(M) < k_alive  # [B, M]  bool
 
     # ------------------------------------------------------------------
@@ -443,6 +447,7 @@ def update_active_mask(
 
 
   active_mask_next = jax.vmap(select_k_best_static)(masked_score, k_alive)
+  jax.debug.print("[halv]new active_mask@{}: {}", round_i, active_mask_next)
   return active_mask_next
 
 def calc_explorer_qvalues(tree, active_mask, sampled_actions):
@@ -493,7 +498,13 @@ def search2(
     max_depth: Optional[int] = None,
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
-    loop_fn: base.LoopFn = jax.lax.fori_loop) -> Tree:
+    # qtransform stuff
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
+    rescale_values: bool = True,
+    use_mixed_value: bool = True,
+    epsilon: chex.Numeric = 1e-8,
+  ) -> Tree:
   """Performs a full search and returns sampled actions.
 
   In the shape descriptions, `B` denotes the batch dimension.
@@ -527,10 +538,10 @@ def search2(
   """
   M = max_num_considered_actions
 
-  action_selection_fn = action_selection.switching_action_selection_wrapper(
-      root_action_selection_fn=root_action_selection_fn,
-      interior_action_selection_fn=interior_action_selection_fn
-  )
+  # action_selection_fn = action_selection.switching_action_selection_wrapper(
+  #     root_action_selection_fn=root_action_selection_fn,
+  #     interior_action_selection_fn=interior_action_selection_fn
+  # )
 
   # Do simulation, expansion, and backward steps.
   batch_size = root.value.shape[0]
@@ -584,8 +595,8 @@ def search2(
   # search tree, total sims expanded, round index, rng
 
   init_carry = (tree, active_mask0, total_sims, 1, rng_key)
-  jax.debug.print("total sims2?: {}", total_sims)
-  jax.debug.print("total sims2?: {}", total_sims)
+  jax.debug.print("[search0] total sims2?: {}", total_sims)
+  jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
   # total_sims = jnp.full_like(total_sims, fill_value=16)
 
   def cond_fun(loop_state):
@@ -637,11 +648,24 @@ def search2(
     root_visits_row       = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, :]                   # [B,A]
     explorer_visit_counts = jnp.take_along_axis(root_visits_row, sampled_actions, axis=1)          # [B,M]
 
-    active_mask = update_active_mask(
-      active_mask, sampled_glogits, explorer_visit_counts, explorer_qvalues, k_alive=n_active, max_explorers=M)
+    active_mask = halve_root_actions_mask(
+      round_i,
+      active_mask,
+      sampled_glogits,
+      explorer_visit_counts,
+      explorer_qvalues,
+      k_alive=n_active,
+      max_explorers=M,
+      # qtransform stuff
+      value_scale=value_scale,
+      maxvisit_init=maxvisit_init,
+      rescale_values=rescale_values,
+      use_mixed_value=use_mixed_value,
+      epsilon=epsilon,
+    )
 
     parent_idxs, actions, next_node_idxs = simulate2(
-        simulate_keys, tree, sampled_actions, sim_count, active_mask, action_selection_fn, max_depth, root=root) # [B,M]
+        simulate_keys, tree, sampled_actions, sim_count, active_mask, interior_action_selection_fn, max_depth, max_num_considered_actions) # [B,M]
 
 
 
@@ -758,7 +782,7 @@ def simulate_root_child(
     is_active: chex.Array,             # bool[M]
     explorer_node_index: chex.Array,   # int32[M]  (1 … M) idx of the root child
     depth: chex.Array,                 # int32[M]  (=1)
-    action_selection_fn: base.InteriorActionSelectionFn,
+    interior_action_selection_fn: base.InteriorActionSelectionFn,
     max_depth: int
 ) -> Tuple[chex.Array, chex.Array]:
   """Idle explorers return (Tree.ROOT_INDEX, original action taken during init_root_children)."""
@@ -784,7 +808,7 @@ def simulate_root_child(
     rng_key, sk          = jax.random.split(state.rng_key)
 
     cur_node             = state.next_node_index
-    action               = action_selection_fn(sk, tree, cur_node, state.depth)
+    action               = interior_action_selection_fn(sk, tree, cur_node, state.depth)
     next_node_idx        = tree.children_index[cur_node, action]
     d                    = state.depth + 1
     cont                 = jnp.logical_and(d < max_depth,
@@ -804,7 +828,7 @@ def simulate_root_child(
 #
 @functools.partial(
     jax.vmap,                       # batch-vectorise over games
-    in_axes=(0, 0, 0, 0, 0, None, None),   # rng, tree, sims_done, mask are batched
+    in_axes=(0, 0, 0, 0, 0, None, None, None),   # rng, tree, sims_done, mask are batched
     out_axes=(0, 0, 0))                    # outputs → [B, M]
 def simulate2(
     rng_key: chex.PRNGKey,
@@ -812,11 +836,10 @@ def simulate2(
     sampled_actions: chex.Array,        # (B, M) after vmap => (M)
     sims_done: chex.Array,              # (B,)  – unused here but kept for API
     active_explorer_mask: chex.Array,   # (B, M) after vmap ⇒ (M) here
-    action_selection_fn: base.InteriorActionSelectionFn,
+    # nonbatched
+    interior_action_selection_fn: base.InteriorActionSelectionFn,
     max_depth: int,
-    *,
-    root: base.RootFnOutput,            # not needed inside function
-    top_m: int = 16                     # == M
+    max_num_considered_actions: int
 ) -> Tuple[chex.Array, chex.Array, chex.Array]:
   """
   Runs one simulation for every *active* root-child explorer.
@@ -828,6 +851,7 @@ def simulate2(
   next_node_idx       : int32[ M ]   – action to expand from that parent, explorer's node idx for idle explorer
   """
 
+  top_m = max_num_considered_actions
 
   # -- 2. Boolean mask of live explorers -------------------------------------
   active            = active_explorer_mask                 # (M,)
@@ -846,7 +870,7 @@ def simulate2(
       active,           # <- pass boolean mask third
       explorer_node_idxs,
       depths,
-      action_selection_fn,
+      interior_action_selection_fn,
       max_depth)
 
 
