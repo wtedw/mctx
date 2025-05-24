@@ -424,6 +424,8 @@ def halve_root_actions_mask(
     _, idx_full = jax.lax.top_k(scores, M)          # [B, M]  static
     jax.debug.print("[halv]top_k, idx_full@{}: {}", round_i, idx_full)
 
+    ranks = jnp.argsort(idx_full) + 1 # represents for [explorer 0's rank in sorted top_k scores, explorer 1, 2, .. M]
+
     # 2) build a per-row mask  mask[b, j] = 1  if j < k_alive[b]
     print("k alive shape", k_alive.shape)
     jax.debug.print("[halv]k alive@{}: {}", round_i, k_alive)
@@ -443,12 +445,13 @@ def halve_root_actions_mask(
     # 3) OR-reduce along the “j” axis  → bool [B, M]
     #    (only one True per column can survive)
     # ------------------------------------------------------------------
-    return jnp.any(one_hot, axis=0)
+    return jnp.any(one_hot, axis=0), ranks
 
 
-  active_mask_next = jax.vmap(select_k_best_static)(masked_score, k_alive)
+  active_mask_next, ranks = jax.vmap(select_k_best_static)(masked_score, k_alive)
   jax.debug.print("[halv]new active_mask@{}: {}", round_i, active_mask_next)
-  return active_mask_next
+  jax.debug.print("[halv]new ranks@{}: {}", round_i, ranks)
+  return active_mask_next, ranks
 
 def calc_explorer_qvalues(tree, active_mask, sampled_actions):
   # ------------------------------------------------------------------
@@ -648,7 +651,7 @@ def search2(
     root_visits_row       = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, :]                   # [B,A]
     explorer_visit_counts = jnp.take_along_axis(root_visits_row, sampled_actions, axis=1)          # [B,M]
 
-    active_mask = halve_root_actions_mask(
+    active_mask, explorer_ranks = halve_root_actions_mask(
       round_i,
       active_mask,
       sampled_glogits,
@@ -664,6 +667,7 @@ def search2(
       epsilon=epsilon,
     )
 
+    # next_node_idxs can be the same child we picked before, in which case, we need to update the same child_idx
     parent_idxs, actions, next_node_idxs = simulate2(
         simulate_keys, tree, sampled_actions, sim_count, active_mask, interior_action_selection_fn, max_depth, max_num_considered_actions) # [B,M]
 
@@ -695,7 +699,8 @@ def search2(
     # each True element gets its unique index from 1 to len(active_mask)
     # each False element, we don't care what its value is
     jax.debug.print("[node_idx]round_i@{}, sim_count: {}", round_i, sim_count)
-    active_unvisited_node_idxs = sim_count[:, None] + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32) # [B, M]
+    # active_unvisited_node_idxs = sim_count[:, None] + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32) # [B, M]
+    active_unvisited_node_idxs = sim_count[:, None] + explorer_ranks # [B, M]
     jax.debug.print("[node_idx]round_i@{}, og_new_idxs: {}", round_i, active_unvisited_node_idxs)
 
     # active_unvisited_node_idxs = (
@@ -857,7 +862,7 @@ def simulate2(
   active            = active_explorer_mask                 # (M,)
 
   # -- 3. Prepare per-explorer start nodes, depths & keys --------------------
-  explorer_node_idxs       = jnp.arange(1, top_m + 1, dtype=jnp.int32)  # node 1…M
+  explorer_node_idxs       = jnp.arange(1, top_m + 1, dtype=jnp.int32)  # node 1…M, always the same
   depths                   = jnp.ones((top_m,), dtype=jnp.int32)        # depth = 1
   subkeys                  = jax.random.split(rng_key, top_m)           # (M,)
 
@@ -872,6 +877,7 @@ def simulate2(
       depths,
       interior_action_selection_fn,
       max_depth)
+
 
 
   # -- 5. Mask-out idle explorers -------------------------------------------
@@ -1334,14 +1340,36 @@ def backward_explorer(tree: Tree,
                 tree.node_values[leaf_idx_vec],
                 delta)
 
-  *_unused, delta_out = jax.lax.while_loop(cond_fun, body_fun, init_state)
+  # *_unused, delta_out = jax.lax.while_loop(cond_fun, body_fun, init_state)
+  loop_i, idx_vec_fin, child_val_vec, delta_out = jax.lax.while_loop(
+      cond_fun, body_fun, init_state)
 
   # Update the root
   num_active_explorers = jnp.sum(active_mask)
+  active_explorers_values = jnp.sum(tree.node_values[root_child_ids] * active_mask) # [M] -> ()
+  root_node_value = tree.node_values[Tree.ROOT_INDEX]
+  root_node_visits = tree.node_visits[Tree.ROOT_INDEX]
+  new_root_value = (root_node_value * root_node_visits + active_explorers_values) / (root_node_visits + num_active_explorers)
+
+  ##### which root action belongs to every explorer?
+  root_actions  = tree.action_from_parent[root_child_ids]          # (M,)
+
+  # increments for children_visits[root, action]
+  visit_inc     = active_mask.astype(delta_out.children_visits.dtype)  # (M,)
+
+  # child-value increment = same increment that went into node_values (don't grab from tree.node_values / children_values cuz stale)
+  value_inc       = delta_out.node_values[root_child_ids]
 
   delta_out = delta_out.replace(
       node_visits     = delta_out.node_visits.at[Tree.ROOT_INDEX].add(num_active_explorers),
-      # node_values     = d.node_values.at[par].add(live_f * (new_val - old_val))
+      node_values     = delta_out.node_values.at[Tree.ROOT_INDEX].add(new_root_value - root_node_value),
+      # children_visits = delta_out.children_visits.at[Tree.ROOT_INDEX, ..., # fill in
+      # children_values = delta_out.children_values.at[Tree.ROOT_INDEX, ...].add() # fill in
+      # per-action tables in the root row
+      children_visits = delta_out.children_visits.at[Tree.ROOT_INDEX,
+                                                     root_actions].add(visit_inc),
+      children_values = delta_out.children_values.at[Tree.ROOT_INDEX,
+                                                     root_actions].add(value_inc),
   )
 
 
@@ -1523,36 +1551,36 @@ def update_tree_node(
   new_visit = tree.node_visits[batch_range, node_index] + 1
 
   # ### [opt1]
-  # updates = dict(  # pylint: disable=use-dict-literal
-  #     children_prior_logits=batch_update(
-  #         tree.children_prior_logits, prior_logits, node_index),
-  #     raw_values=batch_update(
-  #         tree.raw_values, value, node_index),
-  #     node_values=batch_update(
-  #         tree.node_values, value, node_index),
-  #     node_visits=batch_update(
-  #         tree.node_visits, new_visit, node_index),
-  #     embeddings=jax.tree.map(
-  #         lambda t, s: batch_update(t, s, node_index),
-  #         tree.embeddings, embedding))
+  updates = dict(  # pylint: disable=use-dict-literal
+      children_prior_logits=batch_update(
+          tree.children_prior_logits, prior_logits, node_index),
+      raw_values=batch_update(
+          tree.raw_values, value, node_index),
+      node_values=batch_update(
+          tree.node_values, value, node_index),
+      node_visits=batch_update(
+          tree.node_visits, new_visit, node_index),
+      embeddings=jax.tree.map(
+          lambda t, s: batch_update(t, s, node_index),
+          tree.embeddings, embedding))
 
   ### [opt2]
-  updates = dict(  # pylint: disable=use-dict-literal
-      children_prior_logits = add_row_vec(
-                tree.children_prior_logits, node_index, prior_logits),
-      ### rank‑3 row‑vector
-      # children_prior_logits = set_row_vec(tree.children_prior_logits,
-      #                                       node_index, prior_logits),
-      ### og
-      # children_prior_logits=batch_update(
-      #     tree.children_prior_logits, prior_logits, node_index),
-      raw_values=set_row(tree.raw_values, node_index, value),
-      node_values=set_row(tree.node_values, node_index, value),
-      node_visits=set_row(tree.node_visits, node_index, new_visit),
-      embeddings = jax.tree.map(
-            lambda t, s: set_row_any_sparse(t, node_index, s),
-            tree.embeddings, embedding),
-  )
+  # updates = dict(  # pylint: disable=use-dict-literal
+  #     children_prior_logits = add_row_vec(
+  #               tree.children_prior_logits, node_index, prior_logits),
+  #     ### rank‑3 row‑vector
+  #     # children_prior_logits = set_row_vec(tree.children_prior_logits,
+  #     #                                       node_index, prior_logits),
+  #     ### og
+  #     # children_prior_logits=batch_update(
+  #     #     tree.children_prior_logits, prior_logits, node_index),
+  #     raw_values=set_row(tree.raw_values, node_index, value),
+  #     node_values=set_row(tree.node_values, node_index, value),
+  #     node_visits=set_row(tree.node_visits, node_index, new_visit),
+  #     embeddings = jax.tree.map(
+  #           lambda t, s: set_row_any_sparse(t, node_index, s),
+  #           tree.embeddings, embedding),
+  # )
 
   return tree.replace(**updates)
 
@@ -1830,17 +1858,32 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
     print("[opt] maybe_child_action_from_parent", child_action_from_parent.shape)
 
     tree = tree.replace(
-      # ---------- rank‑3 tables (parent, action) ----------
-      children_index      = set_cell(tree.children_index,
-                                      root_idx_vec, action_idx, child_index),
-      children_rewards    = set_cell(tree.children_rewards,
-                                      root_idx_vec, action_idx, child_reward),
-      children_discounts  = set_cell(tree.children_discounts,
-                                      root_idx_vec, action_idx, child_discount),
-      # ---------- rank‑2 tables (row = node) --------------
+      ### somewhat optimized ,but has drift
+      # # ---------- rank‑3 tables (parent, action) ----------
+      # children_index      = set_cell(tree.children_index,
+      #                                 root_idx_vec, action_idx, child_index),
+      # children_rewards    = set_cell(tree.children_rewards,
+      #                                 root_idx_vec, action_idx, child_reward),
+      # children_discounts  = set_cell(tree.children_discounts,
+      #                                 root_idx_vec, action_idx, child_discount),
+      # # ---------- rank‑2 tables (row = node) --------------
+      # parents             = set_row(tree.parents, next_node_index, child_parent),
+      # action_from_parent  = set_row(tree.action_from_parent, next_node_index, child_action_from_parent),
+
+      #### original
+      children_index=batch_update(
+          tree.children_index, child_index, root_idx_vec, action_idx),
+      children_rewards=batch_update(
+          tree.children_rewards, child_reward, root_idx_vec, action_idx),
+      children_discounts=batch_update(
+          tree.children_discounts, child_discount, root_idx_vec, action_idx),
+      # parents=batch_update(tree.parents, child_parent, next_node_index),
       parents             = set_row(tree.parents, next_node_index, child_parent),
       action_from_parent  = set_row(tree.action_from_parent, next_node_index, child_action_from_parent),
+      # action_from_parent=batch_update(
+      #     tree.action_from_parent, child_action_from_parent, next_node_index)
     )
+
     print("[opt] 2children_index", tree.children_index.shape)
     print("[opt] 2child_reward", tree.children_rewards.shape)
     print("[opt] 2child_discount", tree.children_discounts.shape)
