@@ -602,11 +602,25 @@ def search2(
   jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
   # total_sims = jnp.full_like(total_sims, fill_value=16)
 
+  # Determine the end round for all batches
+  n_active_per_batch = jnp.take_along_axis(
+    n_active_explorers_table,               # [M+1,  R]
+    num_actions_considered[:, None],        # [B,1] – per-game m
+    axis=0                                  # gather on first axis
+  )
+  jax.debug.print("n_active_per_batch: {}", n_active_per_batch)
+  first_inactive_round = jnp.sum(n_active_per_batch != 0) # calc "is active per round", then calc position of first inactive round
+  jax.debug.print("first_inactive_round: {}", first_inactive_round)
+
+
   def cond_fun(loop_state):
     tree, active_mask, sims, round, _rng_key = loop_state
     # [todo] what about cases where M is greater than sim?
+    # all_inactive = ~jnp.all(active_mask == False)
+    not_all_inactive = ~jnp.all(round >= first_inactive_round)
+    return jnp.logical_and(not_all_inactive, round < num_simulations)
     # return ~jnp.all(sims >= num_simulations)
-    return round < 2
+    # return round < 2
 
   # def body_fun(sim, loop_state):
   def body_fun(loop_state):
@@ -626,7 +640,8 @@ def search2(
     # active_explorer_mask = active_explorer_table[num_considered, round_i]
 
     ### opt1
-    n_active  = n_active_explorers_table[num_actions_considered, round_i]               # (B,)
+    # n_active  = n_active_explorers_table[num_actions_considered, round_i]               # (B,)
+
     ### opt2
     # ---- number of live explorers in this round, shape [B] --------------
     # take_along_axis guarantees the result keeps the batch axis.
@@ -1283,12 +1298,14 @@ def backward_explorer(tree: Tree,
   def cond_fun(state):
     loop_i, idx_vec, *_ = state
     is_still_climbing = jnp.logical_and(idx_vec != root_child_ids, idx_vec != Tree.NO_PARENT)
+    jax.debug.print("[backwardz3] @{} active_mask: {}", loop_i, active_mask)
+    jax.debug.print("[backwardz3] @{} is_still_climbing: {}", loop_i, is_still_climbing)
     is_any_climbing = jnp.any(jnp.logical_and(active_mask, is_still_climbing))
-    jax.debug.print("[backwardz] @{} is_any_climbing: {}", loop_i, is_any_climbing)
+    jax.debug.print("[backwardz3] @{} is_any_climbing: {}", loop_i, is_any_climbing)
     return is_any_climbing
 
   def body_fun(state):
-    loop_i, idx_vec, leaf_val_vec, d = state     # “d” is the delta tree
+    loop_i, idx_vec, leaf_val_vec, _new_node_val, d = state     # “d” is the delta tree
 
     # parents / actions of *every* explorer
     par = tree.parents[idx_vec]                  # (M,)
@@ -1334,25 +1351,41 @@ def backward_explorer(tree: Tree,
     jax.debug.print("[bw] iter={} live={} max_idx={}",
                     loop_i, live, idx_vec.max())
 
-    return (loop_i + 1, next_idx_vec, leaf_val_vec, d)
+    return (loop_i + 1, next_idx_vec, leaf_val_vec, new_val, d)
 
+  leaf_node_values = tree.node_values[leaf_idx_vec]
   init_state = (0, leaf_idx_vec,
-                tree.node_values[leaf_idx_vec],
+                leaf_node_values,
+                jnp.zeros_like(leaf_node_values),
                 delta)
 
   # *_unused, delta_out = jax.lax.while_loop(cond_fun, body_fun, init_state)
-  loop_i, idx_vec_fin, child_val_vec, delta_out = jax.lax.while_loop(
+  loop_i, idx_vec_fin, leaf_val_vec, explorer_new_node_val, delta_out = jax.lax.while_loop(
       cond_fun, body_fun, init_state)
 
   # Update the root
   num_active_explorers = jnp.sum(active_mask)
-  active_explorers_values = jnp.sum(tree.node_values[root_child_ids] * active_mask) # [M] -> ()
-  root_node_value = tree.node_values[Tree.ROOT_INDEX]
-  root_node_visits = tree.node_visits[Tree.ROOT_INDEX]
-  new_root_value = (root_node_value * root_node_visits + active_explorers_values) / (root_node_visits + num_active_explorers)
-
-  ##### which root action belongs to every explorer?
   root_actions  = tree.action_from_parent[root_child_ids]          # (M,)
+  # active_explorers_values = jnp.sum(tree.node_values[root_child_ids] * active_mask) # [M] -> ()
+
+  # ----- Bellman backup -------------------------------------------
+  reward   = tree.children_rewards  [Tree.ROOT_INDEX, root_actions]
+  discount = tree.children_discounts[Tree.ROOT_INDEX, root_actions]
+  root_leaf_explorer_val = jnp.where(active_mask, reward + discount * leaf_val_vec, 0)
+
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, explorer_new_node_val: {}", leaf_idx_vec, active_mask, explorer_new_node_val)
+  active_explorers_leaf_contributions = jnp.sum(root_leaf_explorer_val) # [M] -> ()
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, active_explorers_leaf_contributions: {}", leaf_idx_vec, active_mask, active_explorers_leaf_contributions)
+  root_node_value = tree.node_values[Tree.ROOT_INDEX]
+
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_value: {}", leaf_idx_vec, active_mask, root_node_value)
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, num_active_explorers: {}", leaf_idx_vec, active_mask, num_active_explorers)
+  root_node_visits = tree.node_visits[Tree.ROOT_INDEX]
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_visits: {}", leaf_idx_vec, active_mask, root_node_visits)
+  new_root_value = (root_node_value * root_node_visits + active_explorers_leaf_contributions) / (root_node_visits + num_active_explorers)
+  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, new_root_value: {}", leaf_idx_vec, active_mask, new_root_value)
+
+
 
   # increments for children_visits[root, action]
   visit_inc     = active_mask.astype(delta_out.children_visits.dtype)  # (M,)
