@@ -1305,7 +1305,11 @@ def backward_explorer(tree: Tree,
     return is_any_climbing
 
   def body_fun(state):
-    loop_i, idx_vec, leaf_val_vec, _new_node_val, d = state     # “d” is the delta tree
+    # Initially, the prev_node_val should be the recently expanded node value, or the existing leaf node value (maybe)
+    #
+    # leaf_val_vec is the new leaf qvalue (always the same), but backproped (discounted by -1) by the last iter
+    # so it'll be leaf_val, then -leaf_val, then leaf_val
+    loop_i, idx_vec, leaf_val_vec, prev_node_val, d = state     # “d” is the delta tree
 
     # parents / actions of *every* explorer
     par = tree.parents[idx_vec]                  # (M,)
@@ -1325,23 +1329,24 @@ def backward_explorer(tree: Tree,
                              reward + discount * leaf_val_vec,
                              leaf_val_vec)
 
-    old_cnt = tree.node_visits[par]
-    new_cnt = old_cnt + live_f                  # add 1 where live == 1
+    old_parent_cnt = tree.node_visits[par]
+    new_parent_cnt = old_parent_cnt + live_f                  # add 1 where live == 1
 
-    old_val = tree.node_values[par]
-    new_val = jnp.where(
+    old_parent_val = tree.node_values[par]
+    new_parent_val = jnp.where(
         live,
-        (old_val * old_cnt + leaf_val_vec) / jnp.maximum(new_cnt, 1),
-        old_val)                                # keep old_val if not live
+        (old_parent_val * old_parent_cnt + leaf_val_vec) / jnp.maximum(new_parent_cnt, 1),
+        old_parent_val)                                # keep old_val if not live
 
     # ---------- accumulate deltas with scatter-add -------------------
     d = d.replace(
         children_visits = d.children_visits.at[par, act].add(live_f),
         children_values = d.children_values.at[par, act].add(
-            live_f * (tree.node_values[idx_vec] -
-                      tree.children_values[par, act])),
+            # live_f * (tree.node_values[idx_vec] -
+            #           tree.children_values[par, act])),
+            live_f * (prev_node_val - tree.children_values[par, act])),
         node_visits     = d.node_visits.at[par].add(live_f),
-        node_values     = d.node_values.at[par].add(live_f * (new_val - old_val))
+        node_values     = d.node_values.at[par].add(live_f * (new_parent_val - old_parent_val))
     )
 
     # ---------- next indices (live explorers move up) ----------------
@@ -1351,13 +1356,10 @@ def backward_explorer(tree: Tree,
     jax.debug.print("[bw] iter={} live={} max_idx={}",
                     loop_i, live, idx_vec.max())
 
-    return (loop_i + 1, next_idx_vec, leaf_val_vec, new_val, d)
+    return (loop_i + 1, next_idx_vec, leaf_val_vec, new_parent_val, d)
 
   leaf_node_values = tree.node_values[leaf_idx_vec]
-  init_state = (0, leaf_idx_vec,
-                leaf_node_values,
-                jnp.zeros_like(leaf_node_values),
-                delta)
+  init_state = (0, leaf_idx_vec, leaf_node_values, leaf_node_values, delta)
 
   # *_unused, delta_out = jax.lax.while_loop(cond_fun, body_fun, init_state)
   loop_i, idx_vec_fin, leaf_val_vec, explorer_new_node_val, delta_out = jax.lax.while_loop(
