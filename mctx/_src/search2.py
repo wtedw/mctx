@@ -374,9 +374,9 @@ def halve_root_actions_mask(
   """
   # 2) -----------------------   scorer for **currently live** buckets ------
   # gather the M children we have buckets for
-  jax.debug.print("[halv]OG explorer_qvalues@{}: {}", round_i, explorer_qvalues)
-  jax.debug.print("[halv]OG explorer_visit_counts@{}: {}", round_i, explorer_visit_counts)
-  jax.debug.print("[halv]OG active_explorer_mask@{}: {}", round_i, active_explorer_mask)
+  # jax.debug.print("[halv]OG explorer_qvalues@{}: {}", round_i, explorer_qvalues)
+  # jax.debug.print("[halv]OG explorer_visit_counts@{}: {}", round_i, explorer_visit_counts)
+  # jax.debug.print("[halv]OG active_explorer_mask@{}: {}", round_i, active_explorer_mask)
   # jax.debug.print("[halv]sampled_glogits: {}", sampled_glogits)
   score_m = jnp.where(active_explorer_mask, sampled_glogits, -jnp.inf)
   # jax.debug.print("[halv]score_m: {}", score_m)
@@ -405,8 +405,8 @@ def halve_root_actions_mask(
   # This will happen when we do top_k with masked_score
   explorer_cqvalues = root_explorer_layer_qtransform(explorer_qvalues)
   masked_score = score_m + explorer_cqvalues
-  jax.debug.print("[halv]explorer_cqvalues@{}: {}", round_i, explorer_cqvalues)
-  jax.debug.print("[halv]masked_score@{}: {}", round_i, masked_score)
+  # jax.debug.print("[halv]explorer_cqvalues@{}: {}", round_i, explorer_cqvalues)
+  # jax.debug.print("[halv]masked_score@{}: {}", round_i, masked_score)
 
   def select_k_best_static(scores: jnp.ndarray,   # [B, M]
                          k_alive: jnp.ndarray,  # [B] – runtime 0‥M
@@ -422,13 +422,13 @@ def halve_root_actions_mask(
     M = max_explorers
     # 1) fixed-K top-k
     _, idx_full = jax.lax.top_k(scores, M)          # [B, M]  static
-    jax.debug.print("[halv]top_k, idx_full@{}: {}", round_i, idx_full)
+    # jax.debug.print("[halv]top_k, idx_full@{}: {}", round_i, idx_full)
 
     ranks = jnp.argsort(idx_full) + 1 # represents for [explorer 0's rank in sorted top_k scores, explorer 1, 2, .. M]
 
     # 2) build a per-row mask  mask[b, j] = 1  if j < k_alive[b]
     print("k alive shape", k_alive.shape)
-    jax.debug.print("[halv]k alive@{}: {}", round_i, k_alive)
+    # jax.debug.print("[halv]k alive@{}: {}", round_i, k_alive)
     keep_mask   = jnp.arange(M) < k_alive  # [B, M]  bool
 
     # ------------------------------------------------------------------
@@ -449,8 +449,8 @@ def halve_root_actions_mask(
 
 
   active_mask_next, ranks = jax.vmap(select_k_best_static)(masked_score, k_alive)
-  jax.debug.print("[halv]new active_mask@{}: {}", round_i, active_mask_next)
-  jax.debug.print("[halv]new ranks@{}: {}", round_i, ranks)
+  # jax.debug.print("[halv]new active_mask@{}: {}", round_i, active_mask_next)
+  # jax.debug.print("[halv]new ranks@{}: {}", round_i, ranks)
   return active_mask_next, ranks
 
 def calc_explorer_qvalues(tree, active_mask, sampled_actions):
@@ -560,7 +560,7 @@ def search2(
   n_active_explorers_table = seq_halving.get_num_active_explorers_table(
       max_num_considered_actions, num_simulations) # [M+1, rounds (which is = nsims)]
   print("n_active_explorers_table shape", n_active_explorers_table.shape)
-  jax.debug.print("n_active_explorers_table: {}", n_active_explorers_table)
+  # jax.debug.print("n_active_explorers_table: {}", n_active_explorers_table)
 
   # ---- init: make every bucket alive on round-0 ----------------------------
   num_actions_considered = jnp.minimum(max_num_considered_actions,
@@ -576,7 +576,7 @@ def search2(
   #     -1                                           # idle
   # ).astype(jnp.int32)
   active_mask0 = jnp.arange(M)[None, :] < k0[:, None] # bool[B,M], first k0 elems out of M are True
-
+  jax.debug.print("active_mask0 is: {}", active_mask0)
 
 
   # Allocate all necessary storage.
@@ -595,11 +595,14 @@ def search2(
     invalid_actions,
     extra_data) # equiv. to simulate, expand, backwards for first layer
 
+  jax.debug.print("[legal] total_sims: {}, sampled_actions: {}", total_sims, sampled_actions)
+  jax.debug.print("[legal] total_sims: {}, node_visits: {}", total_sims, tree.node_visits)
+  jax.debug.print("[legal] total_sims: {}, children_index: {}", total_sims, tree.children_index)
   # search tree, total sims expanded, round index, rng
 
   init_carry = (tree, active_mask0, total_sims, 1, rng_key)
-  jax.debug.print("[search0] total sims2?: {}", total_sims)
-  jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
+  # jax.debug.print("[search0] total sims2?: {}", total_sims)
+  # jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
   # total_sims = jnp.full_like(total_sims, fill_value=16)
 
   # Determine the end round for all batches
@@ -608,7 +611,7 @@ def search2(
     num_actions_considered[:, None],        # [B,1] – per-game m
     axis=0                                  # gather on first axis
   )
-  jax.debug.print("n_active_per_batch: {}", n_active_per_batch)
+  # jax.debug.print("n_active_per_batch: {}", n_active_per_batch)
   first_inactive_round = jnp.sum(n_active_per_batch != 0) # calc "is active per round", then calc position of first inactive round
   jax.debug.print("first_inactive_round: {}", first_inactive_round)
 
@@ -634,7 +637,7 @@ def search2(
     simulate_keys = jax.random.split(simulate_key, batch_size)
 
     # [scrap]
-    # num_valid_actions = jnp.sum(1 - invalid_actions, axis=-1).astype(jnp.int32)
+
     # num_considered = jnp.minimum(
     #     max_num_considered_actions, num_valid_actions)
     # active_explorer_mask = active_explorer_table[num_considered, round_i]
@@ -687,12 +690,12 @@ def search2(
         simulate_keys, tree, sampled_actions, sim_count, active_mask, interior_action_selection_fn, max_depth, max_num_considered_actions) # [B,M]
 
 
-
-    # jax.debug.print("[sim] num_valid_actions: {}", num_valid_actions)
-    # jax.debug.print("[sim] num_considered: {}", num_considered)
+    num_valid_actions = jnp.sum(1 - invalid_actions, axis=-1).astype(jnp.int32) # for debugging
+    jax.debug.print("[sim] num_valid_actions: {}", num_valid_actions)
+    jax.debug.print("[sim] num_actions_considered: {}", num_actions_considered)
     jax.debug.print("[sim] round_i: {}", round_i)
     jax.debug.print("[sim] @{}, active_explorer_mask: {}", round_i, active_mask)
-    # jax.debug.print("[sim] active_explorer_table: {}", active_explorer_table)
+    jax.debug.print("[sim] n_active_explorers_table: {}", n_active_explorers_table)
     jax.debug.print("[sim] @{}, parent idxs: {}, action: {}", round_i, parent_idxs, actions)
     jax.debug.print("[sim] @{}, sampled_actions: {}", round_i, sampled_actions)
     jax.debug.print("[sim] @{}, next_node_idxs: {}", round_i, next_node_idxs)
@@ -713,10 +716,10 @@ def search2(
     # the cumsum of activemask is a list where
     # each True element gets its unique index from 1 to len(active_mask)
     # each False element, we don't care what its value is
-    jax.debug.print("[node_idx]round_i@{}, sim_count: {}", round_i, sim_count)
+    # jax.debug.print("[node_idx]round_i@{}, sim_count: {}", round_i, sim_count)
     # active_unvisited_node_idxs = sim_count[:, None] + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32) # [B, M]
     active_unvisited_node_idxs = sim_count[:, None] + explorer_ranks # [B, M]
-    jax.debug.print("[node_idx]round_i@{}, og_new_idxs: {}", round_i, active_unvisited_node_idxs)
+    # jax.debug.print("[node_idx]round_i@{}, og_new_idxs: {}", round_i, active_unvisited_node_idxs)
 
     # active_unvisited_node_idxs = (
     #   sim_count[:, None]
@@ -738,7 +741,7 @@ def search2(
     next_node_idxs = jnp.where(next_node_idxs == Tree.UNVISITED,
                                 active_unvisited_node_idxs, next_node_idxs)
 
-    jax.debug.print("[expand] @{}, next_node_idxs: {}", round_i, next_node_idxs)
+    # jax.debug.print("[expand] @{}, next_node_idxs: {}", round_i, next_node_idxs)
     tree = expand3(
         params, expand_key, tree, active_mask, recurrent_fn, parent_idxs, actions, next_node_idxs)
 
@@ -754,14 +757,14 @@ def search2(
     )
 
     new_sim_count = sim_count + jnp.sum(active_mask)
-    jax.debug.print("[search2]new_sim_count: {}", new_sim_count)
+    # jax.debug.print("[search2]new_sim_count: {}", new_sim_count)
     loop_state = (tree, active_mask, new_sim_count, round_i + 1, rng_key)
     return loop_state
 
 
   # [todo] reenable]
   tree, _active_mask, total_sims, _round, _rng = jax.lax.while_loop(cond_fun, body_fun, init_carry)
-  jax.debug.print("[search2-fin]new_sim_count: {}", total_sims)
+  # jax.debug.print("[search2-fin]new_sim_count: {}", total_sims)
 
   # ### og
   # _, tree = loop_fn(
@@ -955,46 +958,39 @@ def expand3(
   dtype_idx = tree.children_index.dtype
   dtype_flt = tree.children_rewards.dtype   # rewards / discounts share dtype
 
-  # ------------------------------------------------------------------ #
-  # 2. rank-3 tables: children_{index|rewards|discounts}                #
-  # ------------------------------------------------------------------ #
+  # # ------------------------------------------------------------------ #
+  # # 2. rank-3 tables: children_{index|rewards|discounts}                #
+  # # ------------------------------------------------------------------ #
+  m_row  = jax.nn.one_hot(parent_idxs, N, dtype=dtype_flt)          # [B,M,N]
+  m_col  = jax.nn.one_hot(actions,     A, dtype=dtype_flt)          # [B,M,A]
+  valid  = active_mask.astype(dtype_flt)[..., None, None]           # [B,M,1,1]
   # (B,M,N,A) boolean mask that marks exactly the cells we want to write
-  m_row     = jax.nn.one_hot(parent_idxs, N, dtype=dtype_flt)          # [B,M,N]
-  m_col     = jax.nn.one_hot(actions,     A, dtype=dtype_flt)          # [B,M,A]
-  mask_3d   = m_row[..., None] * m_col[..., None, :]                  # [B,M,N,A]
+  mask_3d = m_row[..., None] * m_col[..., None, :] * valid          # [B,M,N,A]
 
-  # collapse the M dimension → [B,N,A]
-  write_mask = jnp.minimum(mask_3d.sum(1), 1)                         # 0/1
+  write_mask = jnp.minimum(mask_3d.sum(1), 1)                       # [B,N,A]  0/1
 
-  # helper: “blend in” new values wherever write_mask==1
-  def blend(old, new, mask):
-    return old * (1 - mask) + new * mask
-
-  # new values we want to insert
-  new_idx   = (mask_3d * next_node_idxs[..., None, None]).sum(1).astype(dtype_idx)
-  new_rew   = (mask_3d * step.reward   [..., None, None]).sum(1).astype(dtype_flt)
-  new_disc  = (mask_3d * step.discount [..., None, None]).sum(1).astype(dtype_flt)
+  new_idx  = (mask_3d * next_node_idxs[..., None, None]).sum(1).astype(dtype_idx)
+  new_rew  = (mask_3d * step.reward   [..., None, None]).sum(1).astype(dtype_flt)
+  new_disc = (mask_3d * step.discount [..., None, None]).sum(1).astype(dtype_flt)
 
   tree = tree.replace(
-      children_index     = blend(tree.children_index,
-                                 new_idx,   write_mask.astype(dtype_idx)),
-      children_rewards   = blend(tree.children_rewards,
-                                 new_rew,   write_mask),
-      children_discounts = blend(tree.children_discounts,
-                                 new_disc,  write_mask),
+      children_index     = tree.children_index * (1-write_mask.astype(dtype_idx)) + new_idx,
+      children_rewards   = tree.children_rewards * (1-write_mask) + new_rew,
+      children_discounts = tree.children_discounts * (1-write_mask) + new_disc,
   )
 
   # ------------------------------------------------------------------ #
   # 3. rank-2 tables: parents, action_from_parent                      #
   # ------------------------------------------------------------------ #
-  # we already have generic multi-row helpers → just call them
   tree = tree.replace(
-      parents            = set_rows(tree.parents[..., None],
-                                    next_node_idxs,
-                                    parent_idxs)[..., 0].astype(tree.parents.dtype),
-      action_from_parent = set_rows(tree.action_from_parent[..., None],
-                                    next_node_idxs,
-                                    actions)[..., 0].astype(tree.action_from_parent.dtype),
+      parents            = set_rows_anydtype_masked(tree.parents,
+                                                    next_node_idxs,
+                                                    parent_idxs,
+                                                    active_mask),
+      action_from_parent = set_rows_anydtype_masked(tree.action_from_parent,
+                                                    next_node_idxs,
+                                                    actions,
+                                                    active_mask),
   )
 
   # ------------------------------------------------------------------ #
@@ -1153,9 +1149,9 @@ def backward_batch(tree: Tree,
   • Applies the summed delta_tree to `tree` with pure addition.
   """
 
-  jax.debug.print("[backwards] leaf_indices: {}", leaf_indices)
-  jax.debug.print("[backwards] active_mask: {}", active_mask)
-  jax.debug.print("[backwards] root_child_ids: {}", root_child_ids)
+  # jax.debug.print("[backwards] leaf_indices: {}", leaf_indices)
+  # jax.debug.print("[backwards] active_mask: {}", active_mask)
+  # jax.debug.print("[backwards] root_child_ids: {}", root_child_ids)
   # (M, …) pytree of deltas
   delta_trees = backward_explorer(
       tree,
@@ -1298,10 +1294,10 @@ def backward_explorer(tree: Tree,
   def cond_fun(state):
     loop_i, idx_vec, *_ = state
     is_still_climbing = jnp.logical_and(idx_vec != root_child_ids, idx_vec != Tree.NO_PARENT)
-    jax.debug.print("[backwardz3] @{} active_mask: {}", loop_i, active_mask)
-    jax.debug.print("[backwardz3] @{} is_still_climbing: {}", loop_i, is_still_climbing)
+    # jax.debug.print("[backwardz3] @{} active_mask: {}", loop_i, active_mask)
+    # jax.debug.print("[backwardz3] @{} is_still_climbing: {}", loop_i, is_still_climbing)
     is_any_climbing = jnp.any(jnp.logical_and(active_mask, is_still_climbing))
-    jax.debug.print("[backwardz3] @{} is_any_climbing: {}", loop_i, is_any_climbing)
+    # jax.debug.print("[backwardz3] @{} is_any_climbing: {}", loop_i, is_any_climbing)
     return is_any_climbing
 
   def body_fun(state):
@@ -1314,13 +1310,13 @@ def backward_explorer(tree: Tree,
     # parents / actions of *every* explorer
     par = tree.parents[idx_vec]                  # (M,)
     act = tree.action_from_parent[idx_vec]       # (M,)
-    jax.debug.print("[backwardz] @{} par: {}", loop_i, par)
-    jax.debug.print("[backwardz] @{} act: {}", loop_i, act)
+    # jax.debug.print("[backwardz] @{} par: {}", loop_i, par)
+    # jax.debug.print("[backwardz] @{} act: {}", loop_i, act)
 
     # which explorers are doing work this step?
     live = jnp.logical_and(active_mask, still_climbing(idx_vec))  # (M,) bool
     live_f = live.astype(tree.node_visits.dtype)                  # 0/1
-    jax.debug.print("[backwardz] @{} live: {}", loop_i, live)
+    # jax.debug.print("[backwardz] @{} live: {}", loop_i, live)
 
     # ----- Bellman backup -------------------------------------------
     reward   = tree.children_rewards  [par, act]
@@ -1353,8 +1349,8 @@ def backward_explorer(tree: Tree,
     next_idx_vec = jnp.where(live, par, idx_vec)
 
     # optional tracing
-    jax.debug.print("[bw] iter={} live={} max_idx={}",
-                    loop_i, live, idx_vec.max())
+    # jax.debug.print("[bw] iter={} live={} max_idx={}",
+    #                 loop_i, live, idx_vec.max())
 
     return (loop_i + 1, next_idx_vec, leaf_val_vec, new_parent_val, d)
 
@@ -1375,17 +1371,17 @@ def backward_explorer(tree: Tree,
   discount = tree.children_discounts[Tree.ROOT_INDEX, root_actions]
   root_leaf_explorer_val = jnp.where(active_mask, reward + discount * leaf_val_vec, 0)
 
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, explorer_new_node_val: {}", leaf_idx_vec, active_mask, explorer_new_node_val)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, explorer_new_node_val: {}", leaf_idx_vec, active_mask, explorer_new_node_val)
   active_explorers_leaf_contributions = jnp.sum(root_leaf_explorer_val) # [M] -> ()
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, active_explorers_leaf_contributions: {}", leaf_idx_vec, active_mask, active_explorers_leaf_contributions)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, active_explorers_leaf_contributions: {}", leaf_idx_vec, active_mask, active_explorers_leaf_contributions)
   root_node_value = tree.node_values[Tree.ROOT_INDEX]
 
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_value: {}", leaf_idx_vec, active_mask, root_node_value)
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, num_active_explorers: {}", leaf_idx_vec, active_mask, num_active_explorers)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_value: {}", leaf_idx_vec, active_mask, root_node_value)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, num_active_explorers: {}", leaf_idx_vec, active_mask, num_active_explorers)
   root_node_visits = tree.node_visits[Tree.ROOT_INDEX]
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_visits: {}", leaf_idx_vec, active_mask, root_node_visits)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, root_node_visits: {}", leaf_idx_vec, active_mask, root_node_visits)
   new_root_value = (root_node_value * root_node_visits + active_explorers_leaf_contributions) / (root_node_visits + num_active_explorers)
-  jax.debug.print("leaf_idx_vec: {}, active_mask: {}, new_root_value: {}", leaf_idx_vec, active_mask, new_root_value)
+  # jax.debug.print("leaf_idx_vec: {}, active_mask: {}, new_root_value: {}", leaf_idx_vec, active_mask, new_root_value)
 
 
 
@@ -1619,6 +1615,51 @@ def update_tree_node(
 
   return tree.replace(**updates)
 
+
+def update_tree_node_masked(
+    tree: Tree[T],
+    node_index: chex.Array,
+    prior_logits: chex.Array,
+    value: chex.Array,
+    embedding: chex.Array,
+    is_dummy_op: chex.Array) -> Tree[T]:
+  """Updates the tree at node index.
+
+  Args:
+    tree: `Tree` to whose node is to be updated.
+    node_index: the index of the expanded node. Shape `[B]`.
+    prior_logits: the prior logits to fill in for the new node, of shape
+      `[B, num_actions]`.
+    value: the value to fill in for the new node. Shape `[B]`.
+    embedding: the state embeddings for the node. Shape `[B, ...]`.
+
+  Returns:
+    The new tree with updated nodes.
+  """
+  batch_size = tree_lib.infer_batch_size(tree)
+  batch_range = jnp.arange(batch_size)
+  chex.assert_shape(prior_logits, (batch_size, tree.num_actions))
+
+  # When using max_depth, a leaf can be expanded multiple times.
+  inc   = (~is_dummy_op).astype(tree.node_visits.dtype)      # [B,] 0/1
+  new_visit = tree.node_visits[batch_range, node_index] + inc
+
+  # ### [opt1]
+  updates = dict(  # pylint: disable=use-dict-literal
+      children_prior_logits=batch_update(
+          tree.children_prior_logits, prior_logits, node_index),
+      raw_values=batch_update(
+          tree.raw_values, value, node_index),
+      node_values=batch_update(
+          tree.node_values, value, node_index),
+      node_visits=batch_update(
+          tree.node_visits, new_visit, node_index),
+      embeddings=jax.tree.map(
+          lambda t, s: batch_update(t, s, node_index),
+          tree.embeddings, embedding))
+
+  return tree.replace(**updates)
+
 # def update_tree_node_multi(
 #     tree: Tree[T],
 #     node_indices: chex.Array,      # [B, K]
@@ -1799,6 +1840,106 @@ def instantiate_tree_from_root(
       tree, root_index, root.prior_logits, root.value, root.embedding)
   return tree
 
+# def init_root_children(
+#     params,
+#     rng_key,
+#     tree,
+#     root,
+#     recurrent_fn,
+#     max_num_considered_actions,
+#     invalid_actions,
+#     extra_data,
+# ):
+#     B, A = root.prior_logits.shape
+#     M    = max_num_considered_actions
+#     root_row = jnp.zeros((B,), dtype=jnp.int32)          # row-index 0
+
+#     # ---------------------------------------------------------------
+#     # 1) sample the TOP-M actions ( *no* legality filter here )
+#     # ---------------------------------------------------------------
+#     glogits              = extra_data.glogits            # [B, A]
+#     sampled_glogits, sampled_actions = jax.lax.top_k(glogits, M)  # [B,M]
+
+#     # legality of those sampled actions
+#     legal_mask = ~jnp.take_along_axis(
+#         invalid_actions,                # [B, A]
+#         sampled_actions,                # [B, M]
+#         axis=1)                         # -> bool [B,M]
+
+#     total_sims = legal_mask.sum(-1).astype(jnp.int32)    # [B]
+
+#     # ---------------------------------------------------------------
+#     # 2) run model on *all* B×M slots (cheap) – we’ll mask later
+#     # ---------------------------------------------------------------
+#     flat_act   = sampled_actions.reshape(-1)             # (B*M,)
+#     rng_key, subkey = jax.random.split(rng_key)
+#     flat_keys  = jax.random.split(subkey, B*M)
+#     flat_emb   = jax.tree_map(lambda x: jnp.repeat(x, M, axis=0), root.embedding)
+
+#     step_flat, emb_flat = recurrent_fn(params, flat_keys, flat_act, flat_emb)
+
+#     def unflat(t): return t.reshape(B, M, *t.shape[1:])
+#     step      = jax.tree_map(unflat, step_flat)
+#     emb_new   = jax.tree_map(unflat, emb_flat)
+
+#     # ---------------------------------------------------------------
+#     # 3) allocate node IDs 1…M (one per column, same for every batch)
+#     # ---------------------------------------------------------------
+#     node_ids        = jnp.arange(1, M + 1, dtype=jnp.int32)       # (M,)
+#     batch_node_ids  = jnp.broadcast_to(node_ids, (B, M))          # [B,M]
+
+#     # ---------------------------------------------------------------
+#     # 4) write child-level data (masked)
+#     # ---------------------------------------------------------------
+#     tree = update_tree_node_multi(
+#         tree,
+#         batch_node_ids,           # indices
+#         step.prior_logits,        # priors
+#         step.value,               # leaf value
+#         emb_new,                  # embeddings
+#         active_mask=legal_mask,   # *only when legal*
+#     )
+
+#     def _masked_write(tab, val):
+#         return set_row_cols_masked(
+#             tab,
+#             root_row,               # row 0
+#             sampled_actions,        # columns
+#             val,
+#             legal_mask,             # mask
+#         )
+
+#     tree = tree.replace(
+#         children_index     = _masked_write(tree.children_index,     batch_node_ids),
+#         children_rewards   = _masked_write(tree.children_rewards,   step.reward),
+#         children_discounts = _masked_write(tree.children_discounts, step.discount),
+#     )
+
+#     # ---------------------------------------------------------------
+#     # 5) update root statistics in one vector op
+#     # ---------------------------------------------------------------
+#     q = step.reward + step.discount * step.value                    # [B,M]
+#     inc_visits = legal_mask.astype(tree.node_visits.dtype)          # [B,M]
+
+#     add_cnt    = inc_visits.sum(-1)                                 # [B]
+#     add_vsum   = (q * inc_visits).sum(-1)                           # [B]
+
+#     old_vis    = tree.node_visits[:, 0]
+#     old_val    = tree.node_values[:, 0]
+
+#     new_vis    = old_vis + add_cnt
+#     new_val    = (old_val * old_vis + add_vsum) / jnp.maximum(new_vis, 1)
+
+#     tree = tree.replace(
+#         node_visits = set_row(tree.node_visits, root_row, new_vis),
+#         node_values = set_row(tree.node_values, root_row, new_val),
+#     )
+
+#     # ---------------------------------------------------------------
+#     # Done
+#     # ---------------------------------------------------------------
+#     return tree, total_sims, sampled_glogits, sampled_actions
+
 def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_considered_actions, invalid_actions, extra_data):
 
   batch_size = tree_lib.infer_batch_size(tree)
@@ -1842,6 +1983,7 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
 
   def expand_root_child(carry, i):
     next_node_index = new_node_idxs[i] # ()
+    jax.debug.print("[legal] next_node_index: {}", next_node_index)
     batch_next_node_index = jnp.full((batch_size,), new_node_idxs[i], dtype=jnp.int32)  # shape [B]
 
     action_idx = action_idxs[:, i] # [B]
@@ -1861,6 +2003,12 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
 
     # Fill values
     is_action_invalid = invalid_actions[:, i] # [B,]
+    jax.debug.print("[legal] is_action_invalid0: {}", is_action_invalid)
+    is_action_invalid = jnp.take_along_axis(
+                      invalid_actions,
+                      action_idx[:, None],              # gather per‑batch
+                      axis=1)[:, 0]                     # -> [B]
+    jax.debug.print("[legal] is_action_invalid: {}", is_action_invalid)
     print("[opt] is_action_invalid",is_action_invalid.shape)
     print("[opt] action_idx",action_idx.shape)
     print("[opt] tree.children_index",tree.children_index.shape)
@@ -1881,7 +2029,8 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
     print("arange tree.children_index[:, Tree.ROOT_INDEX, action_idx]",tree.children_index[batch_arange, Tree.ROOT_INDEX, action_idx].shape)
     print("arange tree.children_index[:, Tree.ROOT_INDEX, action_idx]2",next_node_index.shape)
 
-    child_index = jnp.where(is_action_invalid, tree.children_index[batch_arange, Tree.ROOT_INDEX, action_idx], next_node_index)
+    # child_index = jnp.where(is_action_invalid, tree.children_index[batch_arange, Tree.ROOT_INDEX, action_idx], next_node_index)
+    child_index = jnp.where(is_action_invalid, Tree.UNVISITED, next_node_index)
     child_reward = jnp.where(is_action_invalid, tree.children_rewards[batch_arange, Tree.ROOT_INDEX, action_idx], step_reward)
     child_discount = jnp.where(is_action_invalid, tree.children_discounts[batch_arange, Tree.ROOT_INDEX, action_idx], step_discount)
     child_parent = jnp.where(is_action_invalid, tree.parents[:, next_node_index], Tree.ROOT_INDEX)
@@ -1942,8 +2091,11 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
     # inside fill_child, we know batch_size
     batch_next = batch_new_node_idxs[:, i]   # this is shape [B]
     print("[opt] batch_next.shape", batch_next.shape)
-    tree = update_tree_node(
-      tree, batch_next, step_prior_logits, step_value, step_embedding)
+
+    # tree = update_tree_node(
+    #   tree, batch_next, step_prior_logits, step_value, step_embedding)
+    tree = update_tree_node_masked(
+      tree, batch_next, step_prior_logits, step_value, step_embedding, is_action_invalid)
 
     # Prep next update
     num_valid_sims = jnp.where(is_action_invalid, num_valid_sims, num_valid_sims + 1)
@@ -1968,6 +2120,7 @@ def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_consid
         action_idxs,                # (B, M)
         axis=1                      # gather along action dimension
     )                               # result → (B, M)
+    jax.debug.print("[backward root children] legal_mask: {}", legal_mask)
 
     # ---------- update per-child tables --------------------------------
     root_children_values  = set_row_cols_masked(
