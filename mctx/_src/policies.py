@@ -1513,12 +1513,15 @@ def gumbel_muzero_policy(
   # Inside the minibatch, the considered_visit can be different on states with
   # a smaller number of valid actions.
   considered_visit = jnp.max(summary.visit_counts, axis=-1, keepdims=True)
+  jax.debug.print("[gumbel reg] considered_visited: {}", considered_visit)
   # The completed_qvalues include imputed values for unvisited actions.
   completed_qvalues = jax.vmap(qtransform, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
       search_tree, search_tree.ROOT_INDEX)
+  jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
       considered_visit, gumbel, root.prior_logits, completed_qvalues,
       summary.visit_counts)
+  jax.debug.print("[gumbel reg] to_argmax: {}", to_argmax)
   action = action_selection.masked_argmax(to_argmax, invalid_actions)
 
 
@@ -1544,6 +1547,9 @@ def gumbel_muzero_policy(
   search_logits= root.prior_logits + completed_qvalues # for debugging
   children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
   children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
+
+  jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
+  jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
 
   return base.PolicyOutput(
       action=action,
@@ -1675,6 +1681,9 @@ def gumbel_muzero_policy2(
   action = action_selection.masked_argmax(to_argmax, invalid_actions)
 
 
+  jax.debug.print("[gumbel opt] considered_visit: {}", considered_visit)
+  jax.debug.print("[gumbel opt] completed_qvalues: {}", completed_qvalues)
+  jax.debug.print("[gumbel opt] to_argmax: {}", to_argmax)
 
 
   # Update the search_tree with completed_qvalues and to_argmax
@@ -1698,6 +1707,8 @@ def gumbel_muzero_policy2(
   children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
   children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
 
+  jax.debug.print("[gumbel opt] completed_search_logits: {}", completed_search_logits)
+  jax.debug.print("[gumbel opt] action_weights: {}", action_weights)
   return base.PolicyOutput(
       action=action,
       action_weights=action_weights,

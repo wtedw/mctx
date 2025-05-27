@@ -143,7 +143,7 @@ def gumbel_muzero_root_action_selection(
   chex.assert_equal_shape([visit_counts, prior_logits])
   completed_qvalues = qtransform(tree, node_index)
 
-  jax.debug.print("[OG root_action]@{}, rootcqvalues: {}", node_index, completed_qvalues)
+  # jax.debug.print("[OG root_action]@{}, rootcqvalues: {}", node_index, completed_qvalues)
 
   table = jnp.array(seq_halving.get_table_of_considered_visits(
       max_num_considered_actions, num_simulations))
@@ -164,7 +164,7 @@ def gumbel_muzero_root_action_selection(
 
   res = masked_argmax(to_argmax, tree.root_invalid_actions)
   # jax.debug.print("[OG root_action]@{}, rootto_argmax: {}", node_index, to_argmax)
-  jax.debug.print("[OG root_action]@{}, res: {}", node_index, res)
+  # jax.debug.print("[OG root_action]@{}, res: {}", node_index, res)
 
   # Masking the invalid actions at the root.
   return masked_argmax(to_argmax, tree.root_invalid_actions)
@@ -193,7 +193,7 @@ def gumbel_muzero_interior_action_selection(
   Returns:
     action: the action selected from the given node.
   """
-  del rng_key, depth
+  # del rng_key, depth
   chex.assert_shape([node_index], ())
   visit_counts = tree.children_visits[node_index]
   prior_logits = tree.children_prior_logits[node_index]
@@ -209,10 +209,20 @@ def gumbel_muzero_interior_action_selection(
       probs=jax.nn.softmax(prior_logits + completed_qvalues),
       visit_counts=visit_counts)
 
+
+  # Add tiny bit of randomness for tie break
+  # node_noise_score = 1e-7 * jax.random.uniform(
+  #     rng_key, (tree.num_actions,))
+  node_noise_score   = 1e-6 * jnp.arange(tree.num_actions, dtype=to_argmax.dtype)
+  to_argmax = to_argmax + node_noise_score
+
   chex.assert_rank(to_argmax, 1)
 
-  jax.debug.print("[OG interior_action]@node{}, cqvalues: {}", node_index, completed_qvalues)
-  jax.debug.print("[OG interior_action]@node{}, res: {}", node_index, jnp.argmax(to_argmax, axis=-1).astype(jnp.int32))
+  # jax.debug.print("[OG interior_action]@node{}, visit_counts: {}", node_index, visit_counts)
+  # jax.debug.print("[OG interior_action]@node{}, prior_logits: {}", node_index, prior_logits)
+  # jax.debug.print("[OG interior_action]@node{}, cqvalues: {}", node_index, completed_qvalues)
+  # jax.debug.print("[OG interior_action]@node{}, to_argmax: {}", node_index, to_argmax)
+  # jax.debug.print("[OG interior_action]@node{}, res: {}", node_index, jnp.argmax(to_argmax, axis=-1).astype(jnp.int32))
 
 
   return jnp.argmax(to_argmax, axis=-1).astype(jnp.int32)
