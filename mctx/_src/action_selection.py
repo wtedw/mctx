@@ -213,8 +213,8 @@ def gumbel_muzero_interior_action_selection(
   # Add tiny bit of randomness for tie break
   # node_noise_score = 1e-7 * jax.random.uniform(
   #     rng_key, (tree.num_actions,))
-  node_noise_score   = 1e-6 * jnp.arange(tree.num_actions, dtype=to_argmax.dtype)
-  to_argmax = to_argmax + node_noise_score
+  # node_noise_score   = 1e-6 * jnp.arange(tree.num_actions, dtype=to_argmax.dtype)
+  # to_argmax = to_argmax + node_noise_score
 
   chex.assert_rank(to_argmax, 1)
 
