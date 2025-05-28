@@ -619,7 +619,7 @@ def search2(
     axis=0                                  # gather on first axis
   )
   # jax.debug.print("n_active_per_batch: {}", n_active_per_batch)
-  first_inactive_round = jnp.sum(n_active_per_batch != 0) # calc "is active per round", then calc position of first inactive round
+  first_inactive_round = jnp.sum(n_active_per_batch != 0, axis=-1) # calc "is active per round", then calc position of first inactive round
   # jax.debug.print("first_inactive_round: {}", first_inactive_round)
 
 
@@ -627,6 +627,13 @@ def search2(
     tree, active_mask, sims, round, _rng_key = loop_state
     # [todo] what about cases where M is greater than sim?
     # all_inactive = ~jnp.all(active_mask == False)
+
+    # finished = (round >= first_inactive_round)
+    # n_finished = jnp.sum(round >= first_inactive_round)
+    # all_finished = jnp.all(finished)
+    # not_all_inactive = (~all_finished)
+    # jax.debug.print("[528] round: {}, finished: {}, n_finished: {}, all_finished: {}, sims: {}", round, finished, n_finished, all_finished, sims)
+
     not_all_inactive = ~jnp.all(round >= first_inactive_round)
     return jnp.logical_and(not_all_inactive, round < num_simulations)
     # return ~jnp.all(sims >= num_simulations)
@@ -763,7 +770,7 @@ def search2(
         root_child_node_idx,   # [B, M]
     )
 
-    new_sim_count = sim_count + jnp.sum(active_mask)
+    new_sim_count = sim_count + jnp.sum(active_mask, axis=-1)
     # jax.debug.print("[search2]new_sim_count: {}", new_sim_count)
     loop_state = (tree, active_mask, new_sim_count, round_i + 1, rng_key)
     return loop_state
@@ -945,9 +952,32 @@ def expand3(
   # ------------------------------------------------------------------ #
   batch_flat    = jnp.repeat(jnp.arange(B), M)       # [K]
   parent_flat   = parent_idxs.reshape(-1)            # [K]
-  emb_flat      = jax.tree_map(
-      lambda x: x[batch_flat, parent_flat],          # -> [K, …]
+  ### opt1
+  # emb_flat      = jax.tree_map(
+  #     lambda x: x[batch_flat, parent_flat],          # -> [K, …]
+  #     tree.embeddings)
+  ### opt2
+  def fast_parent_gather(arr, batch_idx, row_idx):
+    """
+    arr        : [B, N, …]        any dtype / rank ≥ 2
+    batch_idx  : [K]              batch  (0…B-1)  for K leaves
+    row_idx    : [K]              row    (0…N-1)
+    returns    : [K, …]           gathered rows
+    """
+    B, N = arr.shape[:2]
+
+    # ❶ flatten the first two axes once
+    arr_flat = arr.reshape((B * N,) + arr.shape[2:])      # [B*N, …]
+
+    # ❷ linearise the pair (b, n) → b*N + n
+    flat_idx = batch_idx * N + row_idx                    # [K]
+
+    # ❸ 1-D take – this lowers to a simple gather
+    return arr_flat.take(flat_idx, axis=0)                # [K, …]
+  emb_flat = jax.tree_map(
+      lambda x: fast_parent_gather(x, batch_flat, parent_flat),
       tree.embeddings)
+
 
   # RNG for every leaf
   rng_keys      = jax.random.split(rng_key, K)
