@@ -570,8 +570,8 @@ def search2(
   # jax.debug.print("n_active_explorers_table: {}", n_active_explorers_table)
 
   # ---- init: make every bucket alive on round-0 ----------------------------
-  num_actions_considered = jnp.minimum(max_num_considered_actions,
-                                jnp.sum(~invalid_actions, axis=-1))
+  num_legal_moves = jnp.sum(~invalid_actions, axis=-1)
+  num_actions_considered = jnp.minimum(max_num_considered_actions, num_legal_moves)
   print("num_actions_considered shape", num_actions_considered.shape)
   # jax.debug.print("num_actions_considered: {}", num_actions_considered)
 
@@ -612,15 +612,27 @@ def search2(
   # jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
   # total_sims = jnp.full_like(total_sims, fill_value=16)
 
+  # ---------------------------------------------------------------------------
   # Determine the end round for all batches
+  # 1. look up how many explorers are needed in every round
   n_active_per_batch = jnp.take_along_axis(
     n_active_explorers_table,               # [M+1,  R]
     num_actions_considered[:, None],        # [B,1] – per-game m
     axis=0                                  # gather on first axis
   )
+
+  # 2. first round where this game needs **zero** explorers
   # jax.debug.print("n_active_per_batch: {}", n_active_per_batch)
   first_inactive_round = jnp.sum(n_active_per_batch != 0, axis=-1) # calc "is active per round", then calc position of first inactive round
   # jax.debug.print("first_inactive_round: {}", first_inactive_round)
+
+  # # 🆕 3. shorten the “only-one-legal-move” games
+  # min_round = jnp.min(first_inactive_round)        # scalar
+  # first_inactive_round = jnp.where(
+  #     first_inactive_round == num_simulations,     # the forced-move rows
+  #     min_round,                                   # … stop when everyone else stops
+  #     first_inactive_round)                        # … keep original value otherwise
+  # ---------------------------------------------------------------------------
 
 
   def cond_fun(loop_state):
