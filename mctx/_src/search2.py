@@ -592,7 +592,8 @@ def search2(
                                     extra_data=extra_data)
 
   ### opt2
-  tree, total_sims, sampled_glogits, sampled_actions  = init_root_children(
+  # tree, total_sims, sampled_glogits, sampled_actions  = init_root_children(
+  tree, total_sims, sampled_glogits, sampled_actions  = init_root_children_fast(
     params,
     rng_key,
     tree,
@@ -2020,6 +2021,144 @@ def instantiate_tree_from_root(
 #     # Done
 #     # ---------------------------------------------------------------
 #     return tree, total_sims, sampled_glogits, sampled_actions
+
+def _gather2d(src: jnp.ndarray, idx: jnp.ndarray) -> jnp.ndarray:
+    """Fast replacement for take_along_axis(src, idx, axis=1) on [B,N]."""
+    mask = jax.nn.one_hot(idx, src.shape[1], dtype=src.dtype)  # [B,K,N]
+    return jnp.einsum('bkn,bn->bk', mask, src)
+
+def init_root_children_fast(
+    params,
+    rng_key,
+    tree,
+    root,                               # RootFnOutput
+    recurrent_fn,
+    max_num_considered_actions,         # == M
+    invalid_actions,
+    extra_data,
+):
+    B, A   = root.prior_logits.shape
+    M      = max_num_considered_actions
+    ROOT   = tree_lib.Tree.ROOT_INDEX
+    root_row = jnp.zeros((B,), dtype=jnp.int32)
+
+    # ------------------------------------------------------------------
+    # 1.  Gumbel-Top-K  — sample the M root actions once
+    # ------------------------------------------------------------------
+    glogits = extra_data.glogits                         # [B, A]
+    sampled_glogits, sampled_actions = jax.lax.top_k(glogits, M)   # [B,M]
+
+    # legal_mask[b,m] == 1  iff action is legal
+    legal_mask = 1 - _gather2d(invalid_actions, sampled_actions)   # [B,M]
+
+    # how many simulations really happen in each batch row?
+    total_sims = legal_mask.sum(-1).astype(jnp.int32)              # [B]
+
+    # ------------------------------------------------------------------
+    # 2.  Run the model on all B×M children in one call
+    # ------------------------------------------------------------------
+    BxM = B * M
+    flat_act   = sampled_actions.reshape(-1)                       # (B*M,)
+    rng_key, subkey = jax.random.split(rng_key)
+    flat_keys  = jax.random.split(subkey, BxM).reshape(BxM, -1)
+    flat_emb   = jax.tree_map(lambda x: jnp.repeat(x, M, axis=0),
+                              root.embedding)
+
+    step_flat, emb_flat = recurrent_fn(params, flat_keys, flat_act, flat_emb)
+
+    def unflat(x): return x.reshape(B, M, *x.shape[1:])
+    step      = jax.tree_map(unflat, step_flat)                    # [B,M,…]
+    emb_new   = jax.tree_map(unflat, emb_flat)
+
+    # ------------------------------------------------------------------
+    # 3.  Allocate node indices 1…M (same for every batch row)
+    # ------------------------------------------------------------------
+    node_ids = jnp.arange(1, M + 1, dtype=jnp.int32)               # (M,)
+    batch_node_ids = jnp.broadcast_to(node_ids, (B, M))            # [B,M]
+
+    # ------------------------------------------------------------------
+    # 4.  Write **all** children rows (1…M) in one masked operation
+    # ------------------------------------------------------------------
+    tree = update_tree_node_multi(
+        tree,
+        batch_node_ids,               # [B,M] indices
+        step.prior_logits,            # [B,M,A]
+        step.value,                   # [B,M]
+        emb_new,                      # pytree [B,M,…]
+        active_mask=legal_mask.astype(bool)
+    )
+
+    def _masked_write(tab, val):
+        # tab:  [B,N,A], val: [B,M]
+        return set_row_cols_masked(
+            tab,
+            root_row,                 # row 0
+            sampled_actions,          # columns [B,M]
+            val,
+            legal_mask,               # same mask
+        )
+
+    # tree = tree.replace(
+    #     children_index     = _masked_write(
+    #                             tree.children_index, batch_node_ids),
+    #     children_rewards   = _masked_write(tree.children_rewards, step.reward),
+    #     children_discounts = _masked_write(tree.children_discounts,
+    #                                        step.discount),
+    # )
+
+    visit_ones = jnp.ones_like(step.reward, dtype=tree.children_visits.dtype)
+
+    tree = tree.replace(
+        children_index     = _masked_write(tree.children_index,     batch_node_ids),
+        children_rewards   = _masked_write(tree.children_rewards,   step.reward),
+        children_discounts = _masked_write(tree.children_discounts, step.discount),
+        children_visits    = _masked_write(tree.children_visits,    visit_ones),
+        children_values    = _masked_write(tree.children_values,    step.value),
+        # … rank-2 parents/action_from_parent block stays unchanged …
+    )
+
+    # ------------------------------------------------------------------
+    # 4-bis) write rank-2 tables (parents, action_from_parent)
+    # ------------------------------------------------------------------
+    root_parent_ids = jnp.zeros_like(batch_node_ids)        # 0 for every child
+
+    tree = tree.replace(
+        parents = set_rows_anydtype_masked(                 # [B,N]
+            tree.parents,
+            batch_node_ids,            # rows 1…M we just created
+            root_parent_ids,           # each points to ROOT (0)
+            legal_mask),
+        action_from_parent = set_rows_anydtype_masked(      # [B,N]
+            tree.action_from_parent,
+            batch_node_ids,
+            sampled_actions,           # the action that led to the child
+            legal_mask),
+    )
+
+
+
+    # ------------------------------------------------------------------
+    # 5.  Backup root stats in vector form (no scatter)
+    # ------------------------------------------------------------------
+    q = step.reward + step.discount * step.value          # [B,M]
+    visit_inc = legal_mask.astype(tree.node_visits.dtype) # [B,M]
+
+    add_cnt  = visit_inc.sum(-1)                          # [B]
+    add_vsum = (q * visit_inc).sum(-1)                    # [B]
+
+    old_vis  = tree.node_visits[:, ROOT]
+    old_val  = tree.node_values[:, ROOT]
+
+    new_vis = old_vis + add_cnt
+    new_val = (old_val * old_vis + add_vsum) / jnp.maximum(new_vis, 1)
+
+    tree = tree.replace(
+        node_visits = set_row(tree.node_visits, root_row, new_vis),
+        node_values = set_row(tree.node_values, root_row, new_val),
+    )
+
+    return tree, total_sims, sampled_glogits, sampled_actions
+
 
 def init_root_children(params, rng_key, tree, root, recurrent_fn, max_num_considered_actions, invalid_actions, extra_data):
 
