@@ -969,6 +969,7 @@ def expand3(
   # emb_flat      = jax.tree_map(
   #     lambda x: x[batch_flat, parent_flat],          # -> [K, …]
   #     tree.embeddings)
+
   ### opt2
   def fast_parent_gather(arr, batch_idx, row_idx):
     """
@@ -987,9 +988,85 @@ def expand3(
 
     # ❸ 1-D take – this lowers to a simple gather
     return arr_flat.take(flat_idx, axis=0)                # [K, …]
+
   emb_flat = jax.tree_map(
       lambda x: fast_parent_gather(x, batch_flat, parent_flat),
       tree.embeddings)
+
+  # ### opt3
+  # def fast_parent_gather_dot(arr, batch_idx, row_idx):
+  #   """
+  #   Pure-arithmetic replacement for taking rows (batch,row) from `arr`.
+
+  #     arr        : [B, N, …]
+  #     batch_idx  : [K]  int32   (0 … B-1)
+  #     row_idx    : [K]  int32   (0 … N-1)
+  #     returns    : [K, …]       same dtype as arr
+  #   """
+  #   dtype = arr.dtype
+  #   B, N  = arr.shape[:2]
+
+  #   # One-hot masks  – keep them in the *same* dtype as arr (bf16/f32 → fast)
+  #   bmask = jax.nn.one_hot(batch_idx, B, dtype=dtype)      # [K, B]
+  #   rmask = jax.nn.one_hot(row_idx,  N, dtype=dtype)       # [K, N]
+
+  #   # Outer-product → [K, B, N]
+  #   mask  = bmask[:, :, None] * rmask[:, None, :]
+
+  #   # Contract the (B,N) axes against arr
+  #   # ──────────────────────────────────────────────────────────
+  #   #   mask[k, b, n] · arr[b, n, …]  → out[k, …]
+  #   # ──────────────────────────────────────────────────────────
+  #   return jnp.einsum('kbn,bn...->k...', mask, arr)
+
+  # emb_flat = jax.tree_map(
+  #   lambda x: fast_parent_gather_dot(x, batch_flat, parent_flat),
+  #   tree.embeddings)
+
+  # ### [opt4]
+  # def fast_parent_gather_matmul(arr: jnp.ndarray,
+  #                             batch_idx: jnp.ndarray,   # [K]
+  #                             row_idx: jnp.ndarray      # [K]
+  #                            ) -> jnp.ndarray:
+  #   """
+  #   Scatter-free gather that replaces
+
+  #       arr.reshape(B*N, …).take(batch_idx*N + row_idx, axis=0)
+
+  #   with a dot_general against a one-hot selector.
+
+  #   • Works for any trailing feature shape.
+  #   • dtype of the selector = dtype of `arr`  → no extra cast.
+  #   • Pure mul+add ⇒ fuses into one GEMM on TPU / GPU.
+  #   """
+  #   dtype = arr.dtype          # keep bf16/f32 throughput
+  #   B, N  = arr.shape[:2]
+  #   K     = batch_idx.shape[0]
+
+  #   # 1) flatten the table along (B,N)
+  #   flat  = arr.reshape((B * N,) + arr.shape[2:])        # [B*N, …]
+
+  #   # 2) build a (K, B*N) one-hot selector S
+  #   flat_idx = batch_idx * N + row_idx                   # [K]
+  #   # iota     = jax.lax.broadcasted_iota(jnp.int32, (B * N,)) # (B*N,)
+  #   # selector = (flat_idx[:, None] == iota[None, :]).astype(dtype)  # [K,B*N]
+
+  #   selector = jax.nn.one_hot(flat_idx, B * N, dtype=dtype)
+
+  #   # 3) contract selector with the 0-axis of `flat`
+  #   #    result has shape   [K, …]
+  #   out = jax.lax.dot_general(
+  #           selector,          # lhs  [K, B*N]
+  #           flat,              # rhs  [B*N, …]
+  #           (((1,), (0,)),     # contract selector.col with flat.row
+  #            ((), ()))         # no batched dims
+  #         )
+  #   return out
+
+  # emb_flat = jax.tree_map(
+  #   lambda x: fast_parent_gather_matmul(x, batch_flat, parent_flat),
+  #   tree.embeddings)
+
 
 
   # RNG for every leaf
@@ -1384,16 +1461,73 @@ def backward_explorer(tree: Tree,
         (old_parent_val * old_parent_cnt + leaf_val_vec) / jnp.maximum(new_parent_cnt, 1),
         old_parent_val)                                # keep old_val if not live
 
-    # ---------- accumulate deltas with scatter-add -------------------
+    # # [opt1] ---------- accumulate deltas with scatter-add -------------------
+    # d = d.replace(
+    #     children_visits = d.children_visits.at[par, act].add(live_f),
+    #     children_values = d.children_values.at[par, act].add(
+    #         # live_f * (tree.node_values[idx_vec] -
+    #         #           tree.children_values[par, act])),
+    #         live_f * (prev_node_val - tree.children_values[par, act])),
+    #     node_visits     = d.node_visits.at[par].add(live_f),
+    #     node_values     = d.node_values.at[par].add(live_f * (new_parent_val - old_parent_val))
+    # )
+
+    # [opt2] ---- helper for scatter_add equivalent --------------------------------
+    def _add_children(tab, row_idx, col_idx, inc):
+      """
+      tab      : [N, A]   int/float
+      row_idx  : [M]      int32   (parent rows)
+      col_idx  : [M]      int32   (action cols)
+      inc      : [M]      same dtype as tab
+      returns  : tab + Σ_inc  (scatter-free)
+      """
+      N, A = tab.shape
+      rmask = jax.nn.one_hot(row_idx, N, dtype=tab.dtype)        # [M,N]
+      cmask = jax.nn.one_hot(col_idx, A, dtype=tab.dtype)        # [M,A]
+      # outer product → [M,N,A] then sum along explorer axis
+      delta = (rmask[:, :, None] * cmask[:, None, :] * inc[:, None, None]).sum(0)
+      return tab + delta
+
+
+    def _add_nodes(tab, row_idx, inc):
+      """
+      tab      : [N]      int/float
+      row_idx  : [M]      int32
+      inc      : [M]      same dtype
+      """
+      N  = tab.shape[0]
+      rmask = jax.nn.one_hot(row_idx, N, dtype=tab.dtype)        # [M,N]
+      delta = (rmask * inc[:, None]).sum(0)                      # [N]
+      return tab + delta
+
+    # ---- build the per-explorer increments --------------------------------
+    child_vis_inc = live_f                         # [M] (0/1)
+
+    child_val_inc = live_f * (prev_node_val        # [M]
+                              - tree.children_values[par, act])
+
+    node_vis_inc  = live_f                         # [M]
+    node_val_inc  = live_f * (new_parent_val
+                              - old_parent_val)
+
+    # ---- scatter-free accumulation into the delta-tree -------------------
     d = d.replace(
-        children_visits = d.children_visits.at[par, act].add(live_f),
-        children_values = d.children_values.at[par, act].add(
-            # live_f * (tree.node_values[idx_vec] -
-            #           tree.children_values[par, act])),
-            live_f * (prev_node_val - tree.children_values[par, act])),
-        node_visits     = d.node_visits.at[par].add(live_f),
-        node_values     = d.node_values.at[par].add(live_f * (new_parent_val - old_parent_val))
+        children_visits = _add_children(d.children_visits,
+                                        par, act, child_vis_inc),
+        children_values = _add_children(d.children_values,
+                                        par, act, child_val_inc),
+        node_visits     = _add_nodes(d.node_visits,
+                                    par, node_vis_inc),
+        node_values     = _add_nodes(d.node_values,
+                                    par, node_val_inc)
     )
+
+
+
+
+
+
+
 
     # ---------- next indices (live explorers move up) ----------------
     next_idx_vec = jnp.where(live, par, idx_vec)
