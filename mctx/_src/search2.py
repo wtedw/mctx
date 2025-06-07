@@ -356,6 +356,93 @@ def set_rows_anydtype_masked(
     return out_f32.astype(x.dtype)
 
 
+# ### for BK kernels
+# # ──────────────────────────────────────────────────────────────────────────────
+# #  NEW  – helpers for arbitrary–layout live explorers
+# # ──────────────────────────────────────────────────────────────────────────────
+# def pick_live_cols(active_mask: jnp.ndarray, K: int) -> Tuple[jnp.ndarray, jnp.ndarray]:
+#   """
+#   Parameters
+#   ----------
+#   active_mask : bool [B, M]     True ⇔ explorer is live this round
+#   K           : int             round-specific “max_k” (compile-time constant)
+
+#   Returns
+#   -------
+#   live_cols : int32 [B, K]      column indices of the live explorers
+#   live_mask : bool  [B, K]      False where that batch row has <K survivors
+#   """
+#   order     = jnp.argsort(~active_mask, axis=1)     # sort live (1) before dead (0)
+#   live_cols = order[:, :K].astype(jnp.int32)
+#   live_mask = jnp.take_along_axis(active_mask, live_cols, axis=1)
+#   return live_cols, live_mask
+
+
+# def gather_cols(arr: jnp.ndarray, col_idx: jnp.ndarray) -> jnp.ndarray:
+#   """
+#   arr     : [B, M, …]
+#   col_idx : [B, K]
+#   returns : [B, K, …]
+#   """
+#   B, M = arr.shape[:2]
+#   one_hot = jax.nn.one_hot(col_idx, M, dtype=arr.dtype)     # [B, K, M]
+#   return jnp.einsum('bkm,bm...->bk...', one_hot, arr)
+
+
+def scatter_cols(accum: jnp.ndarray,
+                 col_idx: jnp.ndarray,
+                 src: jnp.ndarray,
+                 mask: jnp.ndarray) -> jnp.ndarray:
+  """
+  accum : [B, M, …]   – destination tensor
+  col_idx, src, mask have shapes [B, K], [B, K, …], [B, K]
+  """
+  B, M = accum.shape[:2]
+  one_hot = jax.nn.one_hot(col_idx, M, dtype=accum.dtype) * mask[..., None]
+  delta   = jnp.einsum('bkm,bk...->bm...', one_hot, src)
+  return accum + delta
+
+
+### [BK]
+# ──────────────────────────────────────────────────────────────────────────────
+#  helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def pick_live_cols(active_mask: jnp.ndarray, K: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """
+  active_mask : bool [B, M]      – current “alive” status of every explorer
+  K           : int              – how many columns we want to keep this round
+
+  Returns
+  -------
+  live_cols : int32 [B, K]       – column indices (0‥M-1) to process
+  live_mask : bool  [B, K]       – True  ⇔ that slot is *actually* alive
+                                   False ⇔ pad column (does nothing)
+  """
+  B, M = active_mask.shape
+  idx  = jnp.broadcast_to(jnp.arange(M, dtype=jnp.int32), (B, M))
+
+  # active columns get small keys, inactive columns get large keys → sort
+  sort_keys = jnp.where(active_mask, idx, idx + M)
+  col_ord   = jnp.argsort(sort_keys, axis=1)               # [B, M]
+  live_cols = col_ord[:, :K]                               # [B, K]
+  live_mask = jnp.take_along_axis(active_mask, live_cols, axis=1)
+  return live_cols, live_mask
+
+
+def gather_cols(arr: jnp.ndarray, cols: jnp.ndarray) -> jnp.ndarray:
+  """
+  arr  : [..., M, …]  (gather *along axis-1*)
+  cols : int32 [B, K]
+  """
+  nd   = arr.ndim
+  while cols.ndim < nd:
+    cols = cols[..., None]                                 # [B,K,1,…]
+  return jnp.take_along_axis(arr, cols, axis=1)
+
+
+
+
+
 def halve_root_actions_mask(
     round_i,
     active_explorer_mask,
@@ -399,12 +486,17 @@ def halve_root_actions_mask(
     visit_scale = maxvisit_init + maxvisit # [B, 1]
 
     alpha = value_scale * visit_scale
-    if rescale_values:
-        q_min  = jnp.min(q1, axis=1, keepdims=True)
-        q_max  = jnp.max(q1, axis=1, keepdims=True)
-        q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
-    else:
-        q_norm = q1                      # no rescaling
+    ### [OG]
+    # if rescale_values:
+    #     q_min  = jnp.min(q1, axis=1, keepdims=True)
+    #     q_max  = jnp.max(q1, axis=1, keepdims=True)
+    #     q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
+    # else:
+    #     q_norm = q1                      # no rescaling
+    ### [BK]
+    q_norm = q1                      # no rescaling
+
+
     cq = alpha * q_norm                # completed-Q for the 16 parents
     return cq
 
@@ -499,6 +591,10 @@ def search2(
     params: base.Params,
     rng_key: chex.PRNGKey,
     *,
+    # [BK] stuff
+    round_max_k,
+    round_kernels,
+    # OG stuff
     root: base.RootFnOutput,
     recurrent_fn: base.RecurrentFn,
     root_action_selection_fn: base.RootActionSelectionFn,
@@ -585,7 +681,6 @@ def search2(
   active_mask0 = jnp.arange(M)[None, :] < k0[:, None] # bool[B,M], first k0 elems out of M are True
   # jax.debug.print("active_mask0 is: {}", active_mask0)
 
-
   # Allocate all necessary storage.
   tree = instantiate_tree_from_root(root, num_simulations,
                                     root_invalid_actions=invalid_actions,
@@ -627,12 +722,15 @@ def search2(
   first_inactive_round = jnp.sum(n_active_per_batch != 0, axis=-1) # calc "is active per round", then calc position of first inactive round
   # jax.debug.print("first_inactive_round: {}", first_inactive_round)
 
-  # # 🆕 3. shorten the “only-one-legal-move” games
-  # min_round = jnp.min(first_inactive_round)        # scalar
-  # first_inactive_round = jnp.where(
-  #     first_inactive_round == num_simulations,     # the forced-move rows
-  #     min_round,                                   # … stop when everyone else stops
-  #     first_inactive_round)                        # … keep original value otherwise
+  # 🆕 3. shorten the “only-one-legal-move” games
+  # If it's 1 legal move, first_inactive_round == num_simulations,
+  # and then, we set its inactive round to the earliest time we could terminate
+  # (maybe the game w/ MAX_M that termiantes early)
+  min_round = jnp.min(first_inactive_round)        # scalar
+  first_inactive_round = jnp.where(
+      first_inactive_round == num_simulations,     # the forced-move rows
+      min_round,                                   # … stop when everyone else stops
+      first_inactive_round)                        # … keep original value otherwise
   # ---------------------------------------------------------------------------
 
 
@@ -652,141 +750,170 @@ def search2(
     # return ~jnp.all(sims >= num_simulations)
     # return round < 2
 
-  # def body_fun(sim, loop_state):
+  ### opt3: [BK]
   def body_fun(loop_state):
-    tree, active_mask, sim_count, round_i, rng_key = loop_state
-    # jax.debug.print("[search2body] @{}, tree.node_visits: {}", round_i, tree.node_visits)
+      tree, active_mask, sim_cnt, round_i, rng_key = loop_state
+      k_this = round_max_k[round_i]                # int32 scalar (tracer)
+      return jax.lax.switch(
+          k_this, round_kernels, loop_state,
+          # operands forwarded to every kernel
+          params,
+          sampled_actions,
+          sampled_glogits,
+          num_actions_considered,
+          n_active_explorers_table,
+          value_scale,
+          maxvisit_init,
+          rescale_values,
+          use_mixed_value,
+          epsilon,
+  )
 
-    rng_key, simulate_key, expand_key = jax.random.split(rng_key, 3)
+  # ### opt2: [BK]
+  # # round_max_k is still the static schedule  [R]  we built earlier
+  # # (no Python inspection of its elements!)
+  # def body_fun(loop_state):
+  #   tree, active_mask, sim_cnt, round_i, rng_key = loop_state
 
-    # --- 1. Simulate
-    # simulate is vmapped and expects batched rng keys.
-    simulate_keys = jax.random.split(simulate_key, batch_size)
+  #   K_this_round = jnp.asarray(round_max_k[round_i], jnp.int32)     # tracer OK
+  #   loop_state   = jax.lax.switch(K_this_round, kernels, loop_state)
+  #   return loop_state
 
-    # [scrap]
+  # # opt1
+  # def body_fun(loop_state):
+  #   tree, active_mask, sim_count, round_i, rng_key = loop_state
+  #   # jax.debug.print("[search2body] @{}, tree.node_visits: {}", round_i, tree.node_visits)
 
-    # num_considered = jnp.minimum(
-    #     max_num_considered_actions, num_valid_actions)
-    # active_explorer_mask = active_explorer_table[num_considered, round_i]
+  #   rng_key, simulate_key, expand_key = jax.random.split(rng_key, 3)
 
-    ### opt1
-    # n_active  = n_active_explorers_table[num_actions_considered, round_i]               # (B,)
+  #   # --- 1. Simulate
+  #   # simulate is vmapped and expects batched rng keys.
+  #   simulate_keys = jax.random.split(simulate_key, batch_size)
 
-    ### opt2
-    # ---- number of live explorers in this round, shape [B] --------------
-    # take_along_axis guarantees the result keeps the batch axis.
-    n_active = jnp.take_along_axis(
-      n_active_explorers_table,               # [M+1,  R]
-      num_actions_considered[:, None],        # [B,1] – per-game m
-      axis=0                                  # gather on first axis
-    )[:, round_i]                               # -> [B]
+  #   # [scrap]
 
-    # (optional) defend against accidental squeezing in edge cases
-    n_active = jnp.reshape(n_active, (-1,))     # ensure rank-1
+  #   # num_considered = jnp.minimum(
+  #   #     max_num_considered_actions, num_valid_actions)
+  #   # active_explorer_mask = active_explorer_table[num_considered, round_i]
 
-    print("n active shape", n_active.shape)
-    # jax.debug.print("n_active: {}", n_active)
+  #   ### opt1
+  #   # n_active  = n_active_explorers_table[num_actions_considered, round_i]               # (B,)
 
+  #   ### opt2
+  #   # ---- number of live explorers in this round, shape [B] --------------
+  #   # take_along_axis guarantees the result keeps the batch axis.
+  #   n_active = jnp.take_along_axis(
+  #     n_active_explorers_table,               # [M+1,  R]
+  #     num_actions_considered[:, None],        # [B,1] – per-game m
+  #     axis=0                                  # gather on first axis
+  #   )[:, round_i]                               # -> [B]
 
+  #   # (optional) defend against accidental squeezing in edge cases
+  #   n_active = jnp.reshape(n_active, (-1,))     # ensure rank-1
 
-    explorer_qvalues = calc_explorer_qvalues(tree, active_mask, sampled_actions)
-    ### opt1
-    # explorer_visit_counts = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, sampled_actions]      # [B,M]
-    ### opt2
-    root_visits_row       = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, :]                   # [B,A]
-    explorer_visit_counts = jnp.take_along_axis(root_visits_row, sampled_actions, axis=1)          # [B,M]
-
-    active_mask, explorer_ranks = halve_root_actions_mask(
-      round_i,
-      active_mask,
-      sampled_glogits,
-      explorer_visit_counts,
-      explorer_qvalues,
-      k_alive=n_active,
-      max_explorers=M,
-      # qtransform stuff
-      value_scale=value_scale,
-      maxvisit_init=maxvisit_init,
-      rescale_values=rescale_values,
-      use_mixed_value=use_mixed_value,
-      epsilon=epsilon,
-    )
-
-    # next_node_idxs can be the same child we picked before, in which case, we need to update the same child_idx
-    parent_idxs, actions, next_node_idxs = simulate2(
-        simulate_keys, tree, sampled_actions, sim_count, active_mask, interior_action_selection_fn, max_depth, max_num_considered_actions) # [B,M]
-
-
-    num_valid_actions = jnp.sum(1 - invalid_actions, axis=-1).astype(jnp.int32) # for debugging
-    # jax.debug.print("[sim] num_valid_actions: {}", num_valid_actions)
-    # jax.debug.print("[sim] num_actions_considered: {}", num_actions_considered)
-    # jax.debug.print("[sim] round_i: {}", round_i)
-    # jax.debug.print("[sim] @{}, active_explorer_mask: {}", round_i, active_mask)
-    # jax.debug.print("[sim] n_active_explorers_table: {}", n_active_explorers_table)
-    # jax.debug.print("[sim] @{}, parent idxs: {}, action: {}", round_i, parent_idxs, actions)
-    # jax.debug.print("[sim] @{}, sampled_actions: {}", round_i, sampled_actions)
-    # jax.debug.print("[sim] @{}, next_node_idxs: {}", round_i, next_node_idxs)
-
-    # A node first expanded on simulation `i`, will have node index `i`.
-    # Node 0 corresponds to the root node.
-
-    # ### [optblock]
-    # # # opt1
-    # # next_node_index = tree.children_index[batch_range, parent_index, action]
-    # next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
-    #                                 parent_index,    # [B]
-    #                                 action)          # [B]
-
-    # [ted]
-    # sim_count, a scalar num for (B,) games represents the number of real simulations done,
-    # that have added/updated a node in the tree
-    # the cumsum of activemask is a list where
-    # each True element gets its unique index from 1 to len(active_mask)
-    # each False element, we don't care what its value is
-    # jax.debug.print("[node_idx]round_i@{}, sim_count: {}", round_i, sim_count)
-    # active_unvisited_node_idxs = sim_count[:, None] + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32) # [B, M]
-    active_unvisited_node_idxs = sim_count[:, None] + explorer_ranks # [B, M]
-    # jax.debug.print("[node_idx]round_i@{}, og_new_idxs: {}", round_i, active_unvisited_node_idxs)
-
-    # active_unvisited_node_idxs = (
-    #   sim_count[:, None]
-    #     + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32)
-    #     - 1                                       # ← off-by-one correction
-    # )
-    # jax.debug.print("[node_idx]round_i@{}, yb_new_idxs: {}", round_i, active_unvisited_node_idxs)
+  #   print("n active shape", n_active.shape)
+  #   # jax.debug.print("n_active: {}", n_active)
 
 
 
-    # [ted]
-    # So there's 3 cases
-    # 1. active, UNVISITED, in which case, use active_unvisited_node_idx
-    # 2. active, VISITED, in which case use next_node_idx from simulate (smaller val that's < sims)
-    # 3. inactive, --> use next_node_idx from simulate
-    #       by default it always returned valid node_idx of the original explorer's node idx
-    #       in addition, that root explorer path will have parent = root (0), action = explorer action, next_node_idx = explorer node idx
-    #       so we are safe to expand it
-    next_node_idxs = jnp.where(next_node_idxs == Tree.UNVISITED,
-                                active_unvisited_node_idxs, next_node_idxs)
+  #   explorer_qvalues = calc_explorer_qvalues(tree, active_mask, sampled_actions)
+  #   ### opt1
+  #   # explorer_visit_counts = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, sampled_actions]      # [B,M]
+  #   ### opt2
+  #   root_visits_row       = tree.children_visits[:, tree_lib.Tree.ROOT_INDEX, :]                   # [B,A]
+  #   explorer_visit_counts = jnp.take_along_axis(root_visits_row, sampled_actions, axis=1)          # [B,M]
 
-    # jax.debug.print("[expand] @{}, next_node_idxs: {}", round_i, next_node_idxs)
-    tree = expand3(
-        params, expand_key, tree, active_mask, recurrent_fn, parent_idxs, actions, next_node_idxs)
+  #   active_mask, explorer_ranks = halve_root_actions_mask(
+  #     round_i,
+  #     active_mask,
+  #     sampled_glogits,
+  #     explorer_visit_counts,
+  #     explorer_qvalues,
+  #     k_alive=n_active,
+  #     max_explorers=M,
+  #     # qtransform stuff
+  #     value_scale=value_scale,
+  #     maxvisit_init=maxvisit_init,
+  #     rescale_values=rescale_values,
+  #     use_mixed_value=use_mixed_value,
+  #     epsilon=epsilon,
+  #   )
+
+  #   # next_node_idxs can be the same child we picked before, in which case, we need to update the same child_idx
+  #   parent_idxs, actions, next_node_idxs = simulate2(
+  #       simulate_keys, tree, sampled_actions, sim_count, active_mask, interior_action_selection_fn, max_depth, max_num_considered_actions) # [B,M]
 
 
-    root_child_node_idx = jnp.broadcast_to(
-        jnp.arange(1, M + 1, dtype=jnp.int32),   # (M,)
-        (batch_size, M))                                 # (B, M)
-    tree = backward_batch(
-        tree,
-        next_node_idxs,        # [B, M]  the leaves produced by simulate
-        active_mask,           # [B, M]  bool
-        root_child_node_idx,   # [B, M]
-    )
+  #   num_valid_actions = jnp.sum(1 - invalid_actions, axis=-1).astype(jnp.int32) # for debugging
+  #   # jax.debug.print("[sim] num_valid_actions: {}", num_valid_actions)
+  #   # jax.debug.print("[sim] num_actions_considered: {}", num_actions_considered)
+  #   # jax.debug.print("[sim] round_i: {}", round_i)
+  #   # jax.debug.print("[sim] @{}, active_explorer_mask: {}", round_i, active_mask)
+  #   # jax.debug.print("[sim] n_active_explorers_table: {}", n_active_explorers_table)
+  #   # jax.debug.print("[sim] @{}, parent idxs: {}, action: {}", round_i, parent_idxs, actions)
+  #   # jax.debug.print("[sim] @{}, sampled_actions: {}", round_i, sampled_actions)
+  #   # jax.debug.print("[sim] @{}, next_node_idxs: {}", round_i, next_node_idxs)
 
-    new_sim_count = sim_count + jnp.sum(active_mask, axis=-1)
-    # jax.debug.print("[search2]new_sim_count: {}", new_sim_count)
-    loop_state = (tree, active_mask, new_sim_count, round_i + 1, rng_key)
-    return loop_state
+  #   # A node first expanded on simulation `i`, will have node index `i`.
+  #   # Node 0 corresponds to the root node.
+
+  #   # ### [optblock]
+  #   # # # opt1
+  #   # # next_node_index = tree.children_index[batch_range, parent_index, action]
+  #   # next_node_index = fast_gather_child(tree.children_index.astype(jnp.int32),
+  #   #                                 parent_index,    # [B]
+  #   #                                 action)          # [B]
+
+  #   # [ted]
+  #   # sim_count, a scalar num for (B,) games represents the number of real simulations done,
+  #   # that have added/updated a node in the tree
+  #   # the cumsum of activemask is a list where
+  #   # each True element gets its unique index from 1 to len(active_mask)
+  #   # each False element, we don't care what its value is
+  #   # jax.debug.print("[node_idx]round_i@{}, sim_count: {}", round_i, sim_count)
+  #   # active_unvisited_node_idxs = sim_count[:, None] + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32) # [B, M]
+  #   active_unvisited_node_idxs = sim_count[:, None] + explorer_ranks # [B, M]
+  #   # jax.debug.print("[node_idx]round_i@{}, og_new_idxs: {}", round_i, active_unvisited_node_idxs)
+
+  #   # active_unvisited_node_idxs = (
+  #   #   sim_count[:, None]
+  #   #     + jnp.cumsum(active_mask, axis=-1, dtype=jnp.int32)
+  #   #     - 1                                       # ← off-by-one correction
+  #   # )
+  #   # jax.debug.print("[node_idx]round_i@{}, yb_new_idxs: {}", round_i, active_unvisited_node_idxs)
+
+
+
+  #   # [ted]
+  #   # So there's 3 cases
+  #   # 1. active, UNVISITED, in which case, use active_unvisited_node_idx
+  #   # 2. active, VISITED, in which case use next_node_idx from simulate (smaller val that's < sims)
+  #   # 3. inactive, --> use next_node_idx from simulate
+  #   #       by default it always returned valid node_idx of the original explorer's node idx
+  #   #       in addition, that root explorer path will have parent = root (0), action = explorer action, next_node_idx = explorer node idx
+  #   #       so we are safe to expand it
+  #   next_node_idxs = jnp.where(next_node_idxs == Tree.UNVISITED,
+  #                               active_unvisited_node_idxs, next_node_idxs)
+
+  #   # jax.debug.print("[expand] @{}, next_node_idxs: {}", round_i, next_node_idxs)
+  #   tree = expand3(
+  #       params, expand_key, tree, active_mask, recurrent_fn, parent_idxs, actions, next_node_idxs)
+
+
+  #   root_child_node_idx = jnp.broadcast_to(
+  #       jnp.arange(1, M + 1, dtype=jnp.int32),   # (M,)
+  #       (batch_size, M))                                 # (B, M)
+  #   tree = backward_batch(
+  #       tree,
+  #       next_node_idxs,        # [B, M]  the leaves produced by simulate
+  #       active_mask,           # [B, M]  bool
+  #       root_child_node_idx,   # [B, M]
+  #   )
+
+  #   new_sim_count = sim_count + jnp.sum(active_mask, axis=-1)
+  #   # jax.debug.print("[search2]new_sim_count: {}", new_sim_count)
+  #   loop_state = (tree, active_mask, new_sim_count, round_i + 1, rng_key)
+  #   return loop_state
 
 
   # [todo] reenable]
