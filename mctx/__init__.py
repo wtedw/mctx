@@ -40,6 +40,7 @@ from mctx._src.qtransforms import qtransform_by_min_max
 from mctx._src.qtransforms import qtransform_by_parent_and_siblings
 from mctx._src.qtransforms import qtransform_completed_by_mix_value
 from mctx._src.search import search
+from mctx._src.search2 import search2
 from mctx._src.tree import Tree
 
 __version__ = "0.0.5"
@@ -59,9 +60,11 @@ __all__ = (
     "Tree",
     "gumbel_muzero_interior_action_selection",
     "gumbel_muzero_policy",
+    "gumbel_muzero_policy2",
     "gumbel_muzero_policy_bfs",
     "gumbel_muzero_policy_bfs2",
     "gumbel_muzero_policy_bfs3",
+    "gumbel_muzero_policy_sh2",
     "gumbel_muzero_root_action_selection",
     "muzero_action_selection",
     "muzero_policy",
@@ -69,6 +72,7 @@ __all__ = (
     "qtransform_by_parent_and_siblings",
     "qtransform_completed_by_mix_value",
     "search",
+    "search2",
     "stochastic_muzero_policy",
 )
 

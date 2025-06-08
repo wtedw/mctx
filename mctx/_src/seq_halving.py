@@ -269,3 +269,13 @@ def get_num_active_explorers_table(
   table = jnp.asarray(active, dtype=jnp.int32)
   table = jnp.sum(table != -1, axis=-1)
   return table
+
+def get_round_max_explorers(max_num_considered_actions, num_simulations):
+  """
+  Returns a [num_simulations,] array, where every element represents
+  the max number of active explorers we need to fully expand nodes per round
+  (the number of rounds is equal to num_simulations but we usually terminate early)
+  """
+  active_explorers = get_num_active_explorers_table(
+      max_num_considered_actions, num_simulations)
+  return jnp.max(active_explorers, axis=0)
