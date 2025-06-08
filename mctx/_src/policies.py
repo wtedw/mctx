@@ -1582,6 +1582,9 @@ def gumbel_muzero_policy2(
     rescale_values: bool = True,
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
+    # [BK]
+    round_max_k,
+    round_kernels,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -1641,6 +1644,10 @@ def gumbel_muzero_policy2(
   search_tree = search2.search2(
       params=params,
       rng_key=rng_key,
+      # BK stuff
+      round_max_k=round_max_k,
+      round_kernels=round_kernels,
+      # OG
       root=root,
       recurrent_fn=recurrent_fn,
       root_action_selection_fn=functools.partial(
@@ -1664,6 +1671,7 @@ def gumbel_muzero_policy2(
       rescale_values=rescale_values,
       use_mixed_value=use_mixed_value,
       epsilon=epsilon,
+
     )
   summary = search_tree.summary()
 
