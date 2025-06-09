@@ -44,6 +44,39 @@ def fast_gather_child(src: jnp.ndarray,
   out = jnp.einsum('bna,bna->b', mask, src)
   return out
 
+def fast_gather_1d(src: jnp.ndarray,      # [N]  (int32 / bf16 / f32 …)
+                   idx: jnp.ndarray       # [M]  int32
+                  ) -> jnp.ndarray:       # [M]
+    """Scatter-free gather for rank-1 tensors (no batch dim)."""
+    one_hot = jax.nn.one_hot(idx, src.shape[0], dtype=src.dtype)  # [M, N]
+    return jnp.einsum('mn,n->m', one_hot, src)                    # [M]
+
+def fast_gather_child2d(src_NA: jnp.ndarray,        # [N, A]
+                       row_M:  jnp.ndarray,        # [M]
+                       col_M:  jnp.ndarray         # [M]
+                      ) -> jnp.ndarray:            # [M]
+  """
+  Scatter-free gather   out[m] = src_NA[row_M[m], col_M[m]]
+
+  • src_NA is the *per-batch* slice passed by vmap → rank-2
+  • Pure arithmetic (outer product of one-hots) → fuses into a dot
+  • Works for int / float tensors.
+  """
+  N, A   = src_NA.shape
+
+  rmask  = jax.nn.one_hot(row_M, N, dtype=src_NA.dtype)   # [M, N]
+  cmask  = jax.nn.one_hot(col_M, A, dtype=src_NA.dtype)   # [M, A]
+
+  # Outer product and contract (N, A) against the table.
+  # einsum:    (M,N)·(M,A)·(N,A) → (M)
+  return jnp.einsum('mn,ma,na->m', rmask, cmask, src_NA)
+
+def fast_gather_rows(bn: jnp.ndarray,          # [B, N]
+                     idx_bm: jnp.ndarray       # [B, M]  int32
+                    ) -> jnp.ndarray:          # [B, M]
+  mask = jax.nn.one_hot(idx_bm, bn.shape[1], dtype=bn.dtype)  # [B,M,N]
+  return jnp.einsum('bmn,bn->bm', mask, bn)
+
 # ---------------------------------------------------------------------
 # Overwrite one row  – rank‑2  ([B,N] or [N])
 # ---------------------------------------------------------------------
@@ -573,7 +606,20 @@ def calc_explorer_qvalues(tree, active_mask, sampled_actions):
   # ------------------------------------------------------------------
   # 2. leaf-value   v(b,m)  stored in node_values row (node_idx = 1…M)
   # ------------------------------------------------------------------
+  ### opt1:
   v = tree.node_values[batch_r, node_idx]                                   # [B,M]
+  ### opt2:
+  # N = tree.node_values.shape[1]
+  # # build the constant selector only **once** per compilation
+  # selector = jax.nn.one_hot(
+  #     jnp.arange(1, M + 1),          # rows 1…M are the root’s children
+  #     N,
+  #     dtype=tree.node_values.dtype   # keep dtype (bf16 / f32)
+  # )                                  # shape  [M, N]
+
+  # # (B, N) · (N, M)ᵀ → (B, M)
+  # v = tree.node_values @ selector.T        # single dot_general
+
 
   # ------------------------------------------------------------------
   # 3. completed-Q for every bucket  (reward + γ·value)
@@ -1285,9 +1331,20 @@ def backward_explorer(tree: Tree,
     # so it'll be leaf_val, then -leaf_val, then leaf_val
     loop_i, idx_vec, leaf_val_vec, prev_node_val, d = state     # “d” is the delta tree
 
+
+
     # parents / actions of *every* explorer
-    par = tree.parents[idx_vec]                  # (M,)
-    act = tree.action_from_parent[idx_vec]       # (M,)
+    # ### opt1
+    # par = tree.parents[idx_vec]                  # (M,)
+    # act = tree.action_from_parent[idx_vec]       # (M,)
+
+    ### opt2
+    par = fast_gather_1d(tree.parents,             idx_vec)  # [M]
+    act = fast_gather_1d(tree.action_from_parent,  idx_vec)  # [M]
+
+
+
+
     # jax.debug.print("[backwardz] @{} par: {}", loop_i, par)
     # jax.debug.print("[backwardz] @{} act: {}", loop_i, act)
 
@@ -1297,16 +1354,28 @@ def backward_explorer(tree: Tree,
     # jax.debug.print("[backwardz] @{} live: {}", loop_i, live)
 
     # ----- Bellman backup -------------------------------------------
-    reward   = tree.children_rewards  [par, act]
-    discount = tree.children_discounts[par, act]
+    # ### opt1
+    # reward   = tree.children_rewards  [par, act]
+    # discount = tree.children_discounts[par, act]
+
+    ### opt2
+    reward   = fast_gather_child2d(tree.children_rewards,   par, act)
+    discount = fast_gather_child2d(tree.children_discounts, par, act)
+
     leaf_val_vec = jnp.where(live,              # only live explorers update
                              reward + discount * leaf_val_vec,
                              leaf_val_vec)
 
-    old_parent_cnt = tree.node_visits[par]
-    new_parent_cnt = old_parent_cnt + live_f                  # add 1 where live == 1
+    ###### calc new parent val
+    # ### opt1:
+    # old_parent_cnt = tree.node_visits[par]
+    # old_parent_val = tree.node_values[par]
 
-    old_parent_val = tree.node_values[par]
+    ### opt2:
+    old_parent_cnt = fast_gather_1d(tree.node_visits, par)          # int32
+    old_parent_val = fast_gather_1d(tree.node_values, par)          # float
+
+    new_parent_cnt = old_parent_cnt + live_f                  # add 1 where live == 1
     new_parent_val = jnp.where(
         live,
         (old_parent_val * old_parent_cnt + leaf_val_vec) / jnp.maximum(new_parent_cnt, 1),
@@ -1352,11 +1421,14 @@ def backward_explorer(tree: Tree,
       return tab + delta
 
     # ---- build the per-explorer increments --------------------------------
+    # ### opt1:
+    # old_children_values = tree.children_values[par, act]
+    ### opt2:
+    old_children_values = fast_gather_child2d(tree.children_values, par, act)
+
     child_vis_inc = live_f                         # [M] (0/1)
-
     child_val_inc = live_f * (prev_node_val        # [M]
-                              - tree.children_values[par, act])
-
+                              - old_children_values)
     node_vis_inc  = live_f                         # [M]
     node_val_inc  = live_f * (new_parent_val
                               - old_parent_val)
