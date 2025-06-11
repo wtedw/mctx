@@ -51,24 +51,29 @@ def fast_gather_1d(src: jnp.ndarray,      # [N]  (int32 / bf16 / f32 …)
     one_hot = jax.nn.one_hot(idx, src.shape[0], dtype=src.dtype)  # [M, N]
     return jnp.einsum('mn,n->m', one_hot, src)                    # [M]
 
-def fast_gather_child2d(src_NA: jnp.ndarray,        # [N, A]
-                       row_M:  jnp.ndarray,        # [M]
-                       col_M:  jnp.ndarray         # [M]
-                      ) -> jnp.ndarray:            # [M]
+# ---------------------------------------------------------------------
+# rank-2 gather:  out[m] = src[row_M[m], col_M[m]]
+# ---------------------------------------------------------------------
+def gather_NA(src_NA: jnp.ndarray,         # [N, A]
+              row_M:  jnp.ndarray,         # [M]  int32
+              col_M:  jnp.ndarray          # [M]  int32
+             ) -> jnp.ndarray:             # [M]
   """
-  Scatter-free gather   out[m] = src_NA[row_M[m], col_M[m]]
+  Scatter-free gather from a rank-2 table inside a vmap body.
 
-  • src_NA is the *per-batch* slice passed by vmap → rank-2
-  • Pure arithmetic (outer product of one-hots) → fuses into a dot
-  • Works for int / float tensors.
+  • src_NA  : 2-D tensor you are indexing (children_rewards[b] etc.)
+  • row_M   : parent indices   (length M, NOT batched)
+  • col_M   : action  indices  (length M, NOT batched)
+  • returns : value for every explorer m
   """
-  N, A   = src_NA.shape
+  N, A  = src_NA.shape
+  dtype = src_NA.dtype
 
-  rmask  = jax.nn.one_hot(row_M, N, dtype=src_NA.dtype)   # [M, N]
-  cmask  = jax.nn.one_hot(col_M, A, dtype=src_NA.dtype)   # [M, A]
+  rmask = jax.nn.one_hot(row_M, N, dtype=dtype)       # [M, N]
+  cmask = jax.nn.one_hot(col_M, A, dtype=dtype)       # [M, A]
 
-  # Outer product and contract (N, A) against the table.
-  # einsum:    (M,N)·(M,A)·(N,A) → (M)
+  # outer-product → [M, N, A]; then contract the last two axes
+  # einsum lowers to a single dot_general → one HLO op
   return jnp.einsum('mn,ma,na->m', rmask, cmask, src_NA)
 
 def fast_gather_rows(bn: jnp.ndarray,          # [B, N]
@@ -519,14 +524,14 @@ def halve_root_actions_mask(
     visit_scale = maxvisit_init + maxvisit # [B, 1]
 
     alpha = value_scale * visit_scale
-    ### [OG]
+    # ## [OG]
     # if rescale_values:
     #     q_min  = jnp.min(q1, axis=1, keepdims=True)
     #     q_max  = jnp.max(q1, axis=1, keepdims=True)
     #     q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
     # else:
     #     q_norm = q1                      # no rescaling
-    ### [BK]
+    ## [BK]
     q_norm = q1                      # no rescaling
 
 
@@ -800,6 +805,7 @@ def search2(
   def body_fun(loop_state):
       tree, active_mask, sim_cnt, round_i, rng_key = loop_state
       k_this = round_max_k[round_i]                # int32 scalar (tracer)
+      # jax.debug.print("[bk] round_i: {}, k_this: {}", round_i, k_this)
       return jax.lax.switch(
           k_this, round_kernels, loop_state,
           # operands forwarded to every kernel
@@ -904,11 +910,12 @@ def simulate_root_child(
 #
 @functools.partial(
     jax.vmap,                       # batch-vectorise over games
-    in_axes=(0, 0, 0, 0, 0, None, None, None),   # rng, tree, sims_done, mask are batched
+    in_axes=(0, 0, 0, 0, 0, 0, None, None, None),   # rng, tree, sims_done, mask are batched
     out_axes=(0, 0, 0))                    # outputs → [B, M]
 def simulate2(
     rng_key: chex.PRNGKey,
     tree: Tree,
+    k_starting_node_idxs: chex.Array,   # (B, K) after vmap => (K)
     sampled_actions: chex.Array,        # (B, M) after vmap => (M)
     sims_done: chex.Array,              # (B,)  – unused here but kept for API
     active_explorer_mask: chex.Array,   # (B, M) after vmap ⇒ (M) here
@@ -933,7 +940,10 @@ def simulate2(
   active            = active_explorer_mask                 # (M,)
 
   # -- 3. Prepare per-explorer start nodes, depths & keys --------------------
-  explorer_node_idxs       = jnp.arange(1, top_m + 1, dtype=jnp.int32)  # node 1…M, always the same
+  # [bk-parent-bug]
+  # explorer_node_idxs       = jnp.arange(1, top_m + 1, dtype=jnp.int32)  # node 1…M, always the same
+  explorer_node_idxs       = k_starting_node_idxs
+
   depths                   = jnp.ones((top_m,), dtype=jnp.int32)        # depth = 1
   subkeys                  = jax.random.split(rng_key, top_m)           # (M,)
 
@@ -949,6 +959,9 @@ def simulate2(
       interior_action_selection_fn,
       max_depth)
 
+
+
+  # jax.debug.print("[parentz] simulate2:: {}", parent_idx)
 
 
   # -- 5. Mask-out idle explorers -------------------------------------------
@@ -982,6 +995,8 @@ def expand3(
   N             = tree.children_index.shape[1]       # #rows (nodes)
 
   chex.assert_shape([parent_idxs, actions, next_node_idxs], (B,M))
+  # jax.debug.print("[parentz] expand3:: {}", parent_idxs)
+  # jax.debug.print("[parentz] next_node_idxs:: {}", next_node_idxs)
 
   # ------------------------------------------------------------------ #
   # 1. gather the embeddings of **all** parents in one shot            #
@@ -1331,16 +1346,17 @@ def backward_explorer(tree: Tree,
     # so it'll be leaf_val, then -leaf_val, then leaf_val
     loop_i, idx_vec, leaf_val_vec, prev_node_val, d = state     # “d” is the delta tree
 
+    # jax.debug.print("[backwardexplorer] idx_vec: {}", idx_vec)
 
 
     # parents / actions of *every* explorer
-    # ### opt1
-    # par = tree.parents[idx_vec]                  # (M,)
-    # act = tree.action_from_parent[idx_vec]       # (M,)
+    ### opt1
+    par = tree.parents[idx_vec]                  # (M,)
+    act = tree.action_from_parent[idx_vec]       # (M,)
 
-    ### opt2
-    par = fast_gather_1d(tree.parents,             idx_vec)  # [M]
-    act = fast_gather_1d(tree.action_from_parent,  idx_vec)  # [M]
+    # ### opt2
+    # par = fast_gather_1d(tree.parents,             idx_vec)  # [M]
+    # act = fast_gather_1d(tree.action_from_parent,  idx_vec)  # [M]
 
 
 
@@ -1354,26 +1370,31 @@ def backward_explorer(tree: Tree,
     # jax.debug.print("[backwardz] @{} live: {}", loop_i, live)
 
     # ----- Bellman backup -------------------------------------------
-    # ### opt1
-    # reward   = tree.children_rewards  [par, act]
-    # discount = tree.children_discounts[par, act]
+    ### opt1
+    reward   = tree.children_rewards  [par, act]
+    discount = tree.children_discounts[par, act]
 
-    ### opt2
-    reward   = fast_gather_child2d(tree.children_rewards,   par, act)
-    discount = fast_gather_child2d(tree.children_discounts, par, act)
+    # ## opt2
+    # reward   = fast_gather_child2d(tree.children_rewards,   par, act)
+    # discount = fast_gather_child2d(tree.children_discounts, par, act)
+
+    # ### opt3
+    # reward = gather_NA(tree.children_rewards, par, act)
+    # discount = gather_NA(tree.children_discounts, par, act)
+
 
     leaf_val_vec = jnp.where(live,              # only live explorers update
                              reward + discount * leaf_val_vec,
                              leaf_val_vec)
 
     ###### calc new parent val
-    # ### opt1:
-    # old_parent_cnt = tree.node_visits[par]
-    # old_parent_val = tree.node_values[par]
+    ### opt1:
+    old_parent_cnt = tree.node_visits[par]
+    old_parent_val = tree.node_values[par]
 
-    ### opt2:
-    old_parent_cnt = fast_gather_1d(tree.node_visits, par)          # int32
-    old_parent_val = fast_gather_1d(tree.node_values, par)          # float
+    # ### opt2:
+    # old_parent_cnt = fast_gather_1d(tree.node_visits, par)          # int32
+    # old_parent_val = fast_gather_1d(tree.node_values, par)          # float
 
     new_parent_cnt = old_parent_cnt + live_f                  # add 1 where live == 1
     new_parent_val = jnp.where(
@@ -1421,10 +1442,10 @@ def backward_explorer(tree: Tree,
       return tab + delta
 
     # ---- build the per-explorer increments --------------------------------
-    # ### opt1:
-    # old_children_values = tree.children_values[par, act]
-    ### opt2:
-    old_children_values = fast_gather_child2d(tree.children_values, par, act)
+    ### opt1:
+    old_children_values = tree.children_values[par, act]
+    # ### opt2:
+    # old_children_values = fast_gather_child2d(tree.children_values, par, act)
 
     child_vis_inc = live_f                         # [M] (0/1)
     child_val_inc = live_f * (prev_node_val        # [M]
