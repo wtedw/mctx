@@ -107,6 +107,9 @@ class PolicyOutput(Generic[T]):
   final_score: Optional[Any] = None
   search_logits: Optional[Any] = None
 
+  # For layer 1 debugging
+  layer1_value: Optional[Any] = None
+
   # For BFS2 debugging
   rescaled_qvalues: Optional[Any] = None
   rescaled_qvalues2: Optional[Any] = None

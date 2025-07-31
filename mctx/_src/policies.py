@@ -540,11 +540,11 @@ def gumbel_muzero_policy_sh2(
     else:
         q_norm = q1                      # no rescaling
     cq = alpha * q_norm                # completed-Q for the 16 parents
-    return cq
+    return cq, q_norm
 
   # If we visit and the value is negative, we should pick that over invalid action
   # This will happen when we do top_k with masked_score
-  layer1_cqvalues = layer1_qtransform(layer1_qvalues)
+  layer1_cqvalues, rescaled_qvalues1 = layer1_qtransform(layer1_qvalues)
 
   # ------------------------------------------------------------------------
   # 2) SECOND RUNG  –– keep best 8 roots, add one extra rollout inside each
@@ -789,7 +789,7 @@ def gumbel_muzero_policy_sh2(
       rescale_values=rescale_values,
       epsilon=epsilon)
 
-  (raw_value, mixed_value, maxvisit, rescaled_q, completed_q) = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
+  (raw_value, mixed_value, maxvisit, rescaled_qvalues2, completed_q) = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
       q_root, root.value, root.prior_logits, visit_root)
   # _, _, _, _, completed_q = jax.vmap(qtransform_fn, in_axes=[0, 0, 0, 0])(
   #     q_root, root.value, root.prior_logits, visit_root)
@@ -827,6 +827,9 @@ def gumbel_muzero_policy_sh2(
       root_gumbel      = root_gumbel,                   # [B, A]
       root_prior_logits= root.prior_logits,             # [B, A]
 
+      # layer 1 diagnostics
+      layer1_value     = layer1_out.value,               # [B, A]
+
       # after q‑transform
       final_qvalues    = completed_q,                   # [B, A]
       final_score      = final_score,                   # [B, A]
@@ -835,8 +838,8 @@ def gumbel_muzero_policy_sh2(
       raw_value        = raw_value,                     # [B]
       mixed_value      = mixed_value,                   # [B]
       maxvisit         = maxvisit,                      # [B]
-      rescaled_qvalues = rescaled_q,                   # [B, A]  (optional)
-      rescaled_qvalues2 = rescaled_q,                   # [B, A]  (optional)
+      rescaled_qvalues = rescaled_qvalues1,                   # [B, A]  (optional)
+      rescaled_qvalues2 = rescaled_qvalues2,                   # [B, A]  (optional)
   )
 
 def gumbel_muzero_policy_bfs3(
