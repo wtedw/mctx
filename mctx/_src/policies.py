@@ -536,7 +536,7 @@ def gumbel_muzero_policy_sh2(
     if rescale_values:
         q_min  = jnp.min(q1, axis=1, keepdims=True)
         q_max  = jnp.max(q1, axis=1, keepdims=True)
-        q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
+        q_norm = (q1 - q_min) / jnp.maximum(q_max - q_min, epsilon)
     else:
         q_norm = q1                      # no rescaling
     cq = alpha * q_norm                # completed-Q for the 16 parents
