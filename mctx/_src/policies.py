@@ -813,6 +813,8 @@ def gumbel_muzero_policy_sh2(
   #     visit_counts    = visit_root,
   # )
 
+  # Reshape layer1_value for debugging
+  layer1_value_full = jnp.sum(mask1 * layer1_out.value[:, :, None], 1)
   return base.PolicyOutput(
       # --- decision & training targets ---
       action           = best_a,                        # int32  [B]
@@ -828,7 +830,7 @@ def gumbel_muzero_policy_sh2(
       root_prior_logits= root.prior_logits,             # [B, A]
 
       # layer 1 diagnostics
-      layer1_value     = layer1_out.value,               # [B, A]
+      layer1_value     = layer1_value_full,               # [B, A]
 
       # after q‑transform
       final_qvalues    = completed_q,                   # [B, A]
