@@ -815,6 +815,7 @@ def gumbel_muzero_policy_sh2(
 
   # Reshape layer1_value for debugging
   layer1_value_full = jnp.sum(mask1 * layer1_out.value[:, :, None], 1)
+  rescaled_qvalues1 = jnp.sum(mask1 * rescaled_qvalues1[:, :, None], 1)
   return base.PolicyOutput(
       # --- decision & training targets ---
       action           = best_a,                        # int32  [B]
