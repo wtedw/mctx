@@ -524,16 +524,15 @@ def halve_root_actions_mask(
     visit_scale = maxvisit_init + maxvisit # [B, 1]
 
     alpha = value_scale * visit_scale
-    # ## [OG]
-    # if rescale_values:
-    #     q_min  = jnp.min(q1, axis=1, keepdims=True)
-    #     q_max  = jnp.max(q1, axis=1, keepdims=True)
-    #     q_norm = (q1 - q_min) / (q_max - q_min + epsilon)
-    # else:
-    #     q_norm = q1                      # no rescaling
-    ## [BK]
-    q_norm = q1                      # no rescaling
-
+    ## [OG]
+    if rescale_values:
+        q_min  = jnp.min(q1, axis=1, keepdims=True)
+        q_max  = jnp.max(q1, axis=1, keepdims=True)
+        q_norm = (q1 - q_min) / jnp.maximum(q_max - q_min, epsilon)
+    else:
+        q_norm = q1                      # no rescaling
+    # ## [BK]
+    # q_norm = q1                      # no rescaling
 
     cq = alpha * q_norm                # completed-Q for the 16 parents
     return cq
