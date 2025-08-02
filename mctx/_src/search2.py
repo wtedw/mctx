@@ -813,11 +813,11 @@ def search2(
           sampled_glogits,
           num_actions_considered,
           n_active_explorers_table,
-          value_scale,
-          maxvisit_init,
-          rescale_values,
-          use_mixed_value,
-          epsilon,
+          # value_scale,
+          # maxvisit_init,
+          # rescale_values,
+          # use_mixed_value,
+          # epsilon,
   )
 
   # [todo] reenable]
