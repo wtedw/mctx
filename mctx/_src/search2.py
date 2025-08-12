@@ -642,6 +642,7 @@ def search2(
     rng_key: chex.PRNGKey,
     *,
     # [BK] stuff
+    early_stop_round,
     round_max_k,
     round_kernels,
     # OG stuff
@@ -783,6 +784,7 @@ def search2(
       first_inactive_round)                        # … keep original value otherwise
   # ---------------------------------------------------------------------------
 
+  first_inactive_round = jnp.min(jnp.array([min_round, early_stop_round]))
 
   def cond_fun(loop_state):
     tree, active_mask, sims, round, _rng_key = loop_state
