@@ -97,6 +97,7 @@ def search(
     next_node_index = tree.children_index[batch_range, parent_index, action]
     next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
                                 sim + 1, next_node_index)
+    jax.debug.print("[OGsearch] sim: {}, parent_index: {}, action: {}, next_node_idx: {}", sim, parent_index, action, next_node_index)
     tree = expand(
         params, expand_key, tree, recurrent_fn, parent_index,
         action, next_node_index)
