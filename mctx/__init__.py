@@ -34,6 +34,7 @@ from mctx._src.policies import gumbel_muzero_policy_bfs2
 from mctx._src.policies import gumbel_muzero_policy_bfs
 from mctx._src.policies import gumbel_muzero_policy
 from mctx._src.policies import gumbel_muzero_policy2
+from mctx._src.policies import gumbel_muzero_policy3
 from mctx._src.policies import muzero_policy
 from mctx._src.policies import stochastic_muzero_policy
 from mctx._src.qtransforms import qtransform_by_min_max
@@ -61,6 +62,7 @@ __all__ = (
     "gumbel_muzero_interior_action_selection",
     "gumbel_muzero_policy",
     "gumbel_muzero_policy2",
+    "gumbel_muzero_policy3",
     "gumbel_muzero_policy_bfs",
     "gumbel_muzero_policy_bfs2",
     "gumbel_muzero_policy_bfs3",

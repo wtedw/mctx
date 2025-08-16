@@ -839,6 +839,188 @@ def search2(
 
   return tree
 
+def search_balanced(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    *,
+    # [BK] stuff
+    balanced_table,
+    round_max_k,
+    round_kernels,
+    # OG stuff
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    root_action_selection_fn: base.RootActionSelectionFn,
+    interior_action_selection_fn: base.InteriorActionSelectionFn,
+    num_simulations: int,
+    max_num_considered_actions: int,
+    max_depth: Optional[int] = None,
+    invalid_actions: Optional[chex.Array] = None,
+    extra_data: Any = None,
+    # qtransform stuff
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
+    rescale_values: bool = True,
+    use_mixed_value: bool = True,
+    epsilon: chex.Numeric = 1e-8,
+  ) -> Tree:
+  """Performs a full search and returns sampled actions.
+
+  In the shape descriptions, `B` denotes the batch dimension.
+
+  Args:
+    params: params to be forwarded to root and recurrent functions.
+    rng_key: random number generator state, the key is consumed.
+    root: a `(prior_logits, value, embedding)` `RootFnOutput`. The
+      `prior_logits` are from a policy network. The shapes are
+      `([B, num_actions], [B], [B, ...])`, respectively.
+    recurrent_fn: a callable to be called on the leaf nodes and unvisited
+      actions retrieved by the simulation step, which takes as args
+      `(params, rng_key, action, embedding)` and returns a `RecurrentFnOutput`
+      and the new state embedding. The `rng_key` argument is consumed.
+    root_action_selection_fn: function used to select an action at the root.
+    interior_action_selection_fn: function used to select an action during
+      simulation.
+    num_simulations: the number of simulations.
+    max_depth: maximum search tree depth allowed during simulation, defined as
+      the number of edges from the root to a leaf node.
+    invalid_actions: a mask with invalid actions at the root. In the
+      mask, invalid actions have ones, and valid actions have zeros.
+      Shape `[B, num_actions]`.
+    extra_data: extra data passed to `tree.extra_data`. Shape `[B, ...]`.
+    loop_fn: Function used to run the simulations. It may be required to pass
+      hk.fori_loop if using this function inside a Haiku module.
+
+  Returns:
+    `SearchResults` containing outcomes of the search, e.g. `visit_counts`
+    `[B, num_actions]`.
+  """
+  M = max_num_considered_actions
+
+  # action_selection_fn = action_selection.switching_action_selection_wrapper(
+  #     root_action_selection_fn=root_action_selection_fn,
+  #     interior_action_selection_fn=interior_action_selection_fn
+  # )
+
+  # Do simulation, expansion, and backward steps.
+  batch_size = root.value.shape[0]
+  batch_range = jnp.arange(batch_size)
+  if max_depth is None:
+    max_depth = num_simulations
+  if invalid_actions is None:
+    invalid_actions = jnp.zeros_like(root.prior_logits)
+
+  # --- 1.1 Simulate, Seq Halving Stuff, active explorers
+  # Instead of root action selection, we parallel expand and fill in the tree
+  # Each root explorer keeps track of its num_sims expanded thus far
+  n_active_explorers_table = balanced_table
+  # n_active_explorers_table = seq_halving.get_num_active_explorers_table(
+  #     max_num_considered_actions, num_simulations) # [M+1, rounds (which is = nsims)]
+  print("balanced_table shape", n_active_explorers_table.shape)
+  # jax.debug.print("n_active_explorers_table: {}", n_active_explorers_table)
+
+  # ---- init: make every bucket alive on round-0 ----------------------------
+  num_legal_moves = jnp.sum(~invalid_actions, axis=-1)
+  num_actions_considered = jnp.minimum(max_num_considered_actions, num_legal_moves)
+  print("num_actions_considered shape", num_actions_considered.shape)
+  # jax.debug.print("num_actions_considered: {}", num_actions_considered)
+
+  k0 = n_active_explorers_table[num_actions_considered, 0]        # (B,)
+  # jax.debug.print("k0 is: {}", k0)
+  # active_mask0 = jnp.where(
+  #     jnp.arange(M)[None, :] < k0[:, None],        # bool[B,M]
+  #     0,                                           # first visit target = 0
+  #     -1                                           # idle
+  # ).astype(jnp.int32)
+  active_mask0 = jnp.arange(M)[None, :] < k0[:, None] # bool[B,M], first k0 elems out of M are True
+  # jax.debug.print("active_mask0 is: {}", active_mask0)
+
+  # Allocate all necessary storage.
+  tree = instantiate_tree_from_root(root, num_simulations,
+                                    root_invalid_actions=invalid_actions,
+                                    extra_data=extra_data)
+
+  ### opt2
+  # tree, total_sims, sampled_glogits, sampled_actions  = init_root_children(
+  tree, total_sims, sampled_glogits, sampled_actions  = init_root_children_fast(
+    params,
+    rng_key,
+    tree,
+    root,
+    recurrent_fn,
+    max_num_considered_actions,
+    invalid_actions,
+    extra_data) # equiv. to simulate, expand, backwards for first layer
+
+  # jax.debug.print("[legal] total_sims: {}, sampled_actions: {}", total_sims, sampled_actions)
+  # jax.debug.print("[legal] total_sims: {}, node_visits: {}", total_sims, tree.node_visits)
+  # jax.debug.print("[legal] total_sims: {}, children_index: {}", total_sims, tree.children_index)
+  # search tree, total sims expanded, round index, rng
+
+  init_carry = (tree, active_mask0, total_sims, 1, rng_key)
+  # jax.debug.print("[search0] total sims2?: {}", total_sims)
+  # jax.debug.print("[search0] sampled_actions: {}", sampled_actions)
+  # total_sims = jnp.full_like(total_sims, fill_value=16)
+
+  # ---------------------------------------------------------------------------
+  # Determine the end round for all batches
+  # 1. look up how many explorers are needed in every round
+  n_active_per_batch = jnp.take_along_axis(
+    n_active_explorers_table,               # [M+1,  R]
+    num_actions_considered[:, None],        # [B,1] – per-game m
+    axis=0                                  # gather on first axis
+  )
+
+  # 2. first round where this game needs **zero** explorers
+  first_inactive_round = jnp.sum(n_active_per_batch != 0, axis=-1) # calc "is active per round", then calc position of first inactive round
+
+  def cond_fun(loop_state):
+    tree, active_mask, sims, round, _rng_key = loop_state
+    # [todo] what about cases where M is greater than sim?
+    # all_inactive = ~jnp.all(active_mask == False)
+
+    # finished = (round >= first_inactive_round)
+    # n_finished = jnp.sum(round >= first_inactive_round)
+    # all_finished = jnp.all(finished)
+    # not_all_inactive = (~all_finished)
+    # jax.debug.print("[528] round: {}, finished: {}, n_finished: {}, all_finished: {}, sims: {}", round, finished, n_finished, all_finished, sims)
+
+    not_all_inactive = ~jnp.all(round >= first_inactive_round)
+    res = jnp.logical_and(not_all_inactive, round < num_simulations)
+    # jax.debug.print("[bk,search2] round: {}, res: {}", round, res)
+    return res
+    # return ~jnp.all(sims >= num_simulations)
+    # return round < 2
+
+  ### opt3: [BK]
+  def body_fun(loop_state):
+      tree, active_mask, sim_cnt, round_i, rng_key = loop_state
+      k_this = round_max_k[round_i]                # int32 scalar (tracer)
+      # jax.debug.print("[bk] round_i: {}, k_this: {}", round_i, k_this)
+      return jax.lax.switch(
+          k_this, round_kernels, loop_state,
+          # operands forwarded to every kernel
+          params,
+          sampled_actions,
+          sampled_glogits,
+          num_actions_considered,
+          n_active_explorers_table,
+          # value_scale,
+          # maxvisit_init,
+          # rescale_values,
+          # use_mixed_value,
+          # epsilon,
+  )
+
+  # [todo] reenable]
+  tree, _active_mask, total_sims, _round, _rng = jax.lax.while_loop(cond_fun, body_fun, init_carry)
+  # jax.debug.print("[search2-fin]new_sim_count: {}", total_sims)
+
+  # ### og
+  # _, tree = loop_fn(
+  #     0, num_simulations, body_fun, (rng_key, tree))
+
+  return tree
 
 class _SimulationState(NamedTuple):
   """The state for the simulation while loop."""
