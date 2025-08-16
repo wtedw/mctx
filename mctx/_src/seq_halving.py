@@ -270,6 +270,71 @@ def get_num_active_explorers_table(
   table = jnp.sum(table != -1, axis=-1)
   return table
 
+# --- New Balanced Schedule Function ---
+
+def _find_nsim_linearly(nlegal, target_round, max_m, start_nsim, step, search_limit):
+    """
+    Internal helper to find the first nsim that terminates at the target round.
+    """
+    for nsim in range(start_nsim, search_limit, step):
+        # Note: Using the NumPy-based get_num_active_explorers_table for setup
+        table = get_num_active_explorers_table(max_m, nsim)
+        if table.shape[1] <= target_round:
+            continue
+
+        schedule_row = table[nlegal]
+        is_active_before = schedule_row[target_round - 1] > 0
+        is_terminated_at = schedule_row[target_round] == 0
+
+        if is_active_before and is_terminated_at:
+            return nsim, schedule_row
+
+    return -1, None
+
+def get_balanced_active_explorer_table(
+    max_m: int,
+    stop_round: int,
+    start_nsim: int = 24,
+    step: int = 2,
+    search_limit: int = 1000
+) -> jnp.ndarray:
+    """
+    Generates a schedule table where each row (for each number of legal actions)
+    is calibrated to terminate at the same target_round. This is useful for
+    synchronizing batched MCTS.
+
+    Args:
+        max_m: The maximum number of actions to consider.
+        target_round: The simulation round at which all searches should terminate.
+        start_nsim: The number of simulations to start the linear search from.
+        step: The increment for the linear search.
+        search_limit: The upper bound for the nsim search.
+
+    Returns:
+        A JAX array of shape [max_m + 1, target_round + 1] containing the
+        balanced schedules.
+    """
+    all_schedules = []
+    # Handle trivial cases for 0 and 1 legal actions (always 1 explorer)
+    trivial_schedule = jnp.ones(stop_round + 1, dtype=jnp.int32)
+    trivial_schedule = trivial_schedule.at[-1].set(0)
+    all_schedules.append(trivial_schedule)
+    all_schedules.append(trivial_schedule)
+
+    # Find the optimal schedule for each number of legal actions
+    for nlegal in range(2, max_m + 1):
+        nsim, schedule = _find_nsim_linearly(
+            nlegal, stop_round, max_m, start_nsim, step, search_limit
+        )
+        if nsim == -1:
+            raise ValueError(
+                f"Could not find a terminating schedule for nlegal={nlegal} "
+                f"within the search limit of {search_limit}."
+            )
+        all_schedules.append(schedule[:stop_round + 1])
+
+    return jnp.stack(all_schedules)
+
 def get_round_max_explorers(max_num_considered_actions, num_simulations):
   """
   Returns a [num_simulations,] array, where every element represents

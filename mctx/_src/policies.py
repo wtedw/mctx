@@ -1589,6 +1589,8 @@ def gumbel_muzero_policy2(
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
     # [BK][reenable]
+    use_balanced_table,
+    balanced_stop_round,
     round_max_k,
     round_kernels,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
@@ -1651,6 +1653,8 @@ def gumbel_muzero_policy2(
       params=params,
       rng_key=rng_key,
       # BK stuff [reenable]
+      use_balanced_table=use_balanced_table,
+      balanced_stop_round=balanced_stop_round,
       round_max_k=round_max_k,
       round_kernels=round_kernels,
       # OG
