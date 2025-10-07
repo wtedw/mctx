@@ -40,44 +40,16 @@ def search(
     max_depth: Optional[int] = None,
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
-    loop_fn: base.LoopFn = jax.lax.fori_loop) -> Tree:
-  """Performs a full search and returns sampled actions.
+) -> Tree:
+  """Performs a full search and returns sampled actions (while_loop version)."""
 
-  In the shape descriptions, `B` denotes the batch dimension.
-
-  Args:
-    params: params to be forwarded to root and recurrent functions.
-    rng_key: random number generator state, the key is consumed.
-    root: a `(prior_logits, value, embedding)` `RootFnOutput`. The
-      `prior_logits` are from a policy network. The shapes are
-      `([B, num_actions], [B], [B, ...])`, respectively.
-    recurrent_fn: a callable to be called on the leaf nodes and unvisited
-      actions retrieved by the simulation step, which takes as args
-      `(params, rng_key, action, embedding)` and returns a `RecurrentFnOutput`
-      and the new state embedding. The `rng_key` argument is consumed.
-    root_action_selection_fn: function used to select an action at the root.
-    interior_action_selection_fn: function used to select an action during
-      simulation.
-    num_simulations: the number of simulations.
-    max_depth: maximum search tree depth allowed during simulation, defined as
-      the number of edges from the root to a leaf node.
-    invalid_actions: a mask with invalid actions at the root. In the
-      mask, invalid actions have ones, and valid actions have zeros.
-      Shape `[B, num_actions]`.
-    extra_data: extra data passed to `tree.extra_data`. Shape `[B, ...]`.
-    loop_fn: Function used to run the simulations. It may be required to pass
-      hk.fori_loop if using this function inside a Haiku module.
-
-  Returns:
-    `SearchResults` containing outcomes of the search, e.g. `visit_counts`
-    `[B, num_actions]`.
-  """
+  # Build the (root/interior) action selector once; it’s loop-invariant.
   action_selection_fn = action_selection.switching_action_selection_wrapper(
       root_action_selection_fn=root_action_selection_fn,
       interior_action_selection_fn=interior_action_selection_fn
   )
 
-  # Do simulation, expansion, and backward steps.
+  # Shapes / defaults
   batch_size = root.value.shape[0]
   batch_range = jnp.arange(batch_size)
   if max_depth is None:
@@ -85,34 +57,57 @@ def search(
   if invalid_actions is None:
     invalid_actions = jnp.zeros_like(root.prior_logits)
 
-  def body_fun(sim, loop_state):
-    rng_key, tree = loop_state
-    rng_key, simulate_key, expand_key = jax.random.split(rng_key, 3)
-    # simulate is vmapped and expects batched rng keys.
+  # Allocate all necessary tree storage upfront (loop-invariant).
+  tree = instantiate_tree_from_root(
+      root,
+      num_simulations,
+      root_invalid_actions=invalid_actions,
+      extra_data=extra_data,
+  )
+
+  # ---- while_loop body over simulations ----
+  # Carry only what *changes*: (i, rng_key, tree).
+  def cond_fun(carry):
+    i, _, _ = carry
+    return i < num_simulations
+
+  def body_fun(carry):
+    i, key, tree = carry
+    # Split RNG: one for simulate (batched), one for expand.
+    key, simulate_key, expand_key = jax.random.split(key, 3)
+
+    # simulate is vmapped; give it B distinct keys.
     simulate_keys = jax.random.split(simulate_key, batch_size)
+
+    # Select parent/action according to the policy for this simulation.
     parent_index, action = simulate(
-        simulate_keys, tree, action_selection_fn, max_depth)
-    # A node first expanded on simulation `i`, will have node index `i`.
-    # Node 0 corresponds to the root node.
+        simulate_keys, tree, action_selection_fn, max_depth
+    )
+
+    # Node created at sim i will have index i+1; 0 is root.
     next_node_index = tree.children_index[batch_range, parent_index, action]
-    next_node_index = jnp.where(next_node_index == Tree.UNVISITED,
-                                sim + 1, next_node_index)
+    next_node_index = jnp.where(
+        next_node_index == Tree.UNVISITED, i + 1, next_node_index
+    )
+
+    # Expand the chosen leaf; recurrent_fn uses params and expand_key.
     tree = expand(
-        params, expand_key, tree, recurrent_fn, parent_index,
-        action, next_node_index)
+        params, expand_key, tree, recurrent_fn, parent_index, action, next_node_index
+    )
+
+    # Backpropagate value/visits.
     tree = backward(tree, next_node_index)
-    loop_state = rng_key, tree
-    return loop_state
 
-  # Allocate all necessary storage.
-  tree = instantiate_tree_from_root(root, num_simulations,
-                                    root_invalid_actions=invalid_actions,
-                                    extra_data=extra_data)
+    return (i + 1, key, tree)
+
+  # Run the loop with a lean carry. params/root/etc. are closed-over constants.
   def run_loop(rng_key, tree):
-      _, tree = loop_fn(0, num_simulations, body_fun, (rng_key, tree))
-      return tree
+    init = (jnp.array(0, dtype=jnp.int32), rng_key, tree)
+    _, _, tree = jax.lax.while_loop(cond_fun, body_fun, init)
+    return tree
 
-  run_loop_donate = jax.jit(run_loop, donate_argnums=(1,))  # donate the tree
+  # Donate the big mutable state (tree) so XLA can alias its buffers.
+  run_loop_donate = jax.jit(run_loop, donate_argnums=(1,))
   new_tree = run_loop_donate(rng_key, tree)
   return new_tree
 
