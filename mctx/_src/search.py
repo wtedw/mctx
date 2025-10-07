@@ -108,11 +108,13 @@ def search(
   tree = instantiate_tree_from_root(root, num_simulations,
                                     root_invalid_actions=invalid_actions,
                                     extra_data=extra_data)
-  _, tree = loop_fn(
-      0, num_simulations, body_fun, (rng_key, tree))
+  def run_loop(rng_key, tree):
+      _, tree = loop_fn(0, num_simulations, body_fun, (rng_key, tree))
+      return tree
 
-  return tree
-
+  run_loop_donate = jax.jit(run_loop, donate_argnums=(1,))  # donate the tree
+  new_tree = run_loop_donate(rng_key, tree)
+  return new_tree
 
 class _SimulationState(NamedTuple):
   """The state for the simulation while loop."""
