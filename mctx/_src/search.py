@@ -358,18 +358,18 @@ def instantiate_tree_from_root(
 
   # Create a new empty tree state and fill its root.
   tree = Tree(
-      node_visits=jnp.zeros(batch_node, dtype=jnp.int32),
+      node_visits=jnp.zeros(batch_node, dtype=jnp.int8),
       raw_values=jnp.zeros(batch_node, dtype=data_dtype),
       node_values=jnp.zeros(batch_node, dtype=data_dtype),
-      parents=jnp.full(batch_node, Tree.NO_PARENT, dtype=jnp.int32),
+      parents=jnp.full(batch_node, Tree.NO_PARENT, dtype=jnp.int8),
       action_from_parent=jnp.full(
-          batch_node, Tree.NO_PARENT, dtype=jnp.int32),
+          batch_node, Tree.NO_PARENT, dtype=jnp.int8),
       children_index=jnp.full(
-          batch_node_action, Tree.UNVISITED, dtype=jnp.int32),
+          batch_node_action, Tree.UNVISITED, dtype=jnp.int8),
       children_prior_logits=jnp.zeros(
           batch_node_action, dtype=root.prior_logits.dtype),
       children_values=jnp.zeros(batch_node_action, dtype=data_dtype),
-      children_visits=jnp.zeros(batch_node_action, dtype=jnp.int32),
+      children_visits=jnp.zeros(batch_node_action, dtype=jnp.int8),
       children_rewards=jnp.zeros(batch_node_action, dtype=data_dtype),
       children_discounts=jnp.zeros(batch_node_action, dtype=data_dtype),
       embeddings=jax.tree.map(_zeros, root.embedding),
