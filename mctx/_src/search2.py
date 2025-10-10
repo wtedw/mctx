@@ -642,8 +642,6 @@ def search2(
     rng_key: chex.PRNGKey,
     *,
     # [BK] stuff
-    use_balanced_table,
-    balanced_stop_round,
     round_max_k,
     round_kernels,
     # OG stuff
@@ -712,12 +710,8 @@ def search2(
   # --- 1.1 Simulate, Seq Halving Stuff, active explorers
   # Instead of root action selection, we parallel expand and fill in the tree
   # Each root explorer keeps track of its num_sims expanded thus far
-  if use_balanced_table:
-    n_active_explorers_table = seq_halving.get_balanced_active_explorer_table(
-        max_num_considered_actions, balanced_stop_round) # [M+1, rounds]
-  else:
-    n_active_explorers_table = seq_halving.get_num_active_explorers_table(
-        max_num_considered_actions, num_simulations) # [M+1, rounds (which is = nsims)]
+  n_active_explorers_table = seq_halving.get_num_active_explorers_table(
+      max_num_considered_actions, num_simulations) # [M+1, rounds (which is = nsims)]
   print("n_active_explorers_table shape", n_active_explorers_table.shape)
   # jax.debug.print("n_active_explorers_table: {}", n_active_explorers_table)
 
@@ -783,13 +777,10 @@ def search2(
   # and then, we set its inactive round to the earliest time we could terminate
   # (maybe the game w/ MAX_M that termiantes early)
   min_round = jnp.min(first_inactive_round)        # scalar
-  if use_balanced_table:
-    first_inactive_round = min_round
-  else:
-    first_inactive_round = jnp.where(
-        first_inactive_round == num_simulations,     # the forced-move rows
-        min_round,                                   # … stop when everyone else stops
-        first_inactive_round)                        # … keep original value otherwise
+  first_inactive_round = jnp.where(
+      first_inactive_round == num_simulations,     # the forced-move rows
+      min_round,                                   # … stop when everyone else stops
+      first_inactive_round)                        # … keep original value otherwise
   # ---------------------------------------------------------------------------
 
 
