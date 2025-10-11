@@ -25,6 +25,7 @@ from mctx._src import base
 from mctx._src import qtransforms
 from mctx._src import search
 from mctx._src import search2
+from mctx._src import search_bnk
 from mctx._src import seq_halving
 
 
@@ -1891,6 +1892,147 @@ def gumbel_muzero_policy3(
 
   # jax.debug.print("[gumbel opt] completed_search_logits: {}", completed_search_logits)
   # jax.debug.print("[gumbel opt] action_weights: {}", action_weights)
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+      search_tree=search_tree,
+      search_logits=search_logits,
+      children_values=children_values,
+      root_gumbel=gumbel,
+      root_prior_logits=root.prior_logits,
+      final_qvalues=completed_qvalues,
+      final_score=to_argmax,
+  )
+
+
+def gumbel_muzero_policy_bnk(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    num_simulations: int,
+    invalid_actions: Optional[chex.Array] = None,
+    max_depth: Optional[int] = None,
+    loop_fn: base.LoopFn = jax.lax.fori_loop,
+    *,
+    qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
+    max_num_considered_actions: int = 16,
+    gumbel_scale: chex.Numeric = 1.,
+) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
+  """Runs Gumbel MuZero search and returns the `PolicyOutput`.
+
+  This policy implements Full Gumbel MuZero from
+  "Policy improvement by planning with Gumbel".
+  https://openreview.net/forum?id=bERaNdoegnO
+
+  At the root of the search tree, actions are selected by Sequential Halving
+  with Gumbel. At non-root nodes (aka interior nodes), actions are selected by
+  the Full Gumbel MuZero deterministic action selection.
+
+  In the shape descriptions, `B` denotes the batch dimension.
+
+  Args:
+    params: params to be forwarded to root and recurrent functions.
+    rng_key: random number generator state, the key is consumed.
+    root: a `(prior_logits, value, embedding)` `RootFnOutput`. The
+      `prior_logits` are from a policy network. The shapes are
+      `([B, num_actions], [B], [B, ...])`, respectively.
+    recurrent_fn: a callable to be called on the leaf nodes and unvisited
+      actions retrieved by the simulation step, which takes as args
+      `(params, rng_key, action, embedding)` and returns a `RecurrentFnOutput`
+      and the new state embedding. The `rng_key` argument is consumed.
+    num_simulations: the number of simulations.
+    invalid_actions: a mask with invalid actions. Invalid actions
+      have ones, valid actions have zeros in the mask. Shape `[B, num_actions]`.
+    max_depth: maximum search tree depth allowed during simulation.
+    loop_fn: Function used to run the simulations. It may be required to pass
+      hk.fori_loop if using this function inside a Haiku module.
+    qtransform: function to obtain completed Q-values for a node.
+    max_num_considered_actions: the maximum number of actions expanded at the
+      root node. A smaller number of actions will be expanded if the number of
+      valid actions is smaller.
+    gumbel_scale: scale for the Gumbel noise. Evalution on perfect-information
+      games can use gumbel_scale=0.0.
+
+  Returns:
+    `PolicyOutput` containing the proposed action, action_weights and the used
+    search tree.
+  """
+  # Masking invalid actions.
+  root = root.replace(
+      prior_logits=_mask_invalid_actions(root.prior_logits, invalid_actions))
+
+  # Generating Gumbel.
+  rng_key, gumbel_rng = jax.random.split(rng_key)
+  gumbel = gumbel_scale * jax.random.gumbel(
+      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  # Searching.
+  extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=gumbel)
+  search_tree = search_bnk.search_bnk(
+      params=params,
+      rng_key=rng_key,
+      root=root,
+      recurrent_fn=recurrent_fn,
+      root_action_selection_fn=functools.partial(
+          action_selection.gumbel_muzero_root_action_selection,
+          num_simulations=num_simulations,
+          max_num_considered_actions=max_num_considered_actions,
+          qtransform=qtransform,
+      ),
+      interior_action_selection_fn=functools.partial(
+          action_selection.gumbel_muzero_interior_action_selection,
+          qtransform=qtransform,
+      ),
+      num_simulations=num_simulations,
+      max_depth=max_depth,
+      invalid_actions=invalid_actions,
+      extra_data=extra_data)
+  summary = search_tree.summary()
+
+  # Acting with the best action from the most visited actions.
+  # The "best" action has the highest `gumbel + logits + q`.
+  # Inside the minibatch, the considered_visit can be different on states with
+  # a smaller number of valid actions.
+  considered_visit = jnp.max(summary.visit_counts, axis=-1, keepdims=True)
+  # jax.debug.print("[gumbel reg] considered_visited: {}", considered_visit)
+  # The completed_qvalues include imputed values for unvisited actions.
+  completed_qvalues = jax.vmap(qtransform, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
+      search_tree, search_tree.ROOT_INDEX)
+  # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
+  to_argmax = seq_halving.score_considered(
+      considered_visit, gumbel, root.prior_logits, completed_qvalues,
+      summary.visit_counts)
+  # jax.debug.print("[gumbel reg] to_argmax: {}", to_argmax)
+  action = action_selection.masked_argmax(to_argmax, invalid_actions)
+
+
+
+
+  # Update the search_tree with completed_qvalues and to_argmax
+  search_tree = search_tree.replace(
+      completed_qvalues=completed_qvalues,
+      to_argmax=to_argmax
+  )
+
+  # Producing action_weights usable to train the policy network.
+  completed_search_logits = _mask_invalid_actions(
+      root.prior_logits + completed_qvalues, invalid_actions)
+
+  action_weights = jax.nn.softmax(completed_search_logits)
+  # return base.PolicyOutput(
+  #     action=action,
+  #     action_weights=action_weights,
+  #     search_tree=search_tree)
+
+  # [bfs] for debugging
+  search_logits= root.prior_logits + completed_qvalues # for debugging
+  children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
+  children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
+
+  # jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
+  # jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
+
   return base.PolicyOutput(
       action=action,
       action_weights=action_weights,

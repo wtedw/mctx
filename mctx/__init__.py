@@ -42,6 +42,7 @@ from mctx._src.qtransforms import qtransform_by_parent_and_siblings
 from mctx._src.qtransforms import qtransform_completed_by_mix_value
 from mctx._src.search import search
 from mctx._src.search2 import search2
+from mctx._src.search_bnk import search_bnk
 from mctx._src.tree import Tree
 
 __version__ = "0.0.5"
@@ -75,6 +76,7 @@ __all__ = (
     "qtransform_completed_by_mix_value",
     "search",
     "search2",
+    "search_bnk",
     "stochastic_muzero_policy",
 )
 
