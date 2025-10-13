@@ -2036,7 +2036,8 @@ def gumbel_muzero_policy_bnk(
   full_weights = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
 
   ### Put the K probs back into A slots; others stay 0
-  action_weights = full_weights.at[batch_range, k_indices].set(k_action_weights)  # [B, A]
+  batch_idx = batch_range[:, None]  # [B, 1] broadcast to [B, K]
+  action_weights = full_weights.at[batch_idx, k_indices].set(k_action_weights)  # [B, A]
 
   # [bfs] for debugging
   search_logits= k_logits + completed_qvalues # for debugging
