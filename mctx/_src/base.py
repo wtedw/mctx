@@ -64,6 +64,7 @@ class RootFnOutput:
   prior_logits: chex.Array
   value: chex.Array
   embedding: RecurrentState
+  k_indices: Optional[Any] = None
 
 
 # Action selection functions specify how to pick nodes to expand in the tree.

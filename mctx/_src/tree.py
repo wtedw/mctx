@@ -72,6 +72,7 @@ class Tree(Generic[T]):
   extra_data: T  # [B, ...]
   # completed_qvalues: chex.Array  # [B, num_actions]
   # to_argmax: chex.Array          # [B, num_actions]
+  children_k_indices: Optional[chex.Array] = None
   completed_qvalues: Optional[chex.Array] = None
   to_argmax: Optional[chex.Array] = None
 

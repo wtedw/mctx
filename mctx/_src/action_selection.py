@@ -162,7 +162,7 @@ def gumbel_muzero_root_action_selection(
       considered_visit, gumbel, prior_logits, completed_qvalues,
       visit_counts)
 
-  res = masked_argmax(to_argmax, tree.root_invalid_actions)
+  # res = masked_argmax(to_argmax, tree.root_invalid_actions)
   # jax.debug.print("[OG root_action]@{}, rootto_argmax: {}", node_index, to_argmax)
   # jax.debug.print("[OG root_action]@{}, res: {}", node_index, res)
 

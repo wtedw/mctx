@@ -1910,6 +1910,7 @@ def gumbel_muzero_policy_bnk(
     rng_key: chex.PRNGKey,
     root: base.RootFnOutput,
     recurrent_fn: base.RecurrentFn,
+    num_k_actions: int,
     num_simulations: int,
     invalid_actions: Optional[chex.Array] = None,
     max_depth: Optional[int] = None,
@@ -1941,6 +1942,7 @@ def gumbel_muzero_policy_bnk(
       actions retrieved by the simulation step, which takes as args
       `(params, rng_key, action, embedding)` and returns a `RecurrentFnOutput`
       and the new state embedding. The `rng_key` argument is consumed.
+    num_k_actions: the number of max legal actions per env state.
     num_simulations: the number of simulations.
     invalid_actions: a mask with invalid actions. Invalid actions
       have ones, valid actions have zeros in the mask. Shape `[B, num_actions]`.
@@ -1958,14 +1960,23 @@ def gumbel_muzero_policy_bnk(
     `PolicyOutput` containing the proposed action, action_weights and the used
     search tree.
   """
+  batch_size, num_actions = root.prior_logits.shape
+  k_logits, k_indices = jax.lax.top_k(root.prior_logits, k=num_k_actions)
+  if invalid_actions is None:
+      k_invalid_actions = None
+  else:
+      k_invalid_actions = jnp.take_along_axis(invalid_actions, k_indices, axis=-1)
+
   # Masking invalid actions.
   root = root.replace(
-      prior_logits=_mask_invalid_actions(root.prior_logits, invalid_actions))
+      prior_logits=_mask_invalid_actions(k_logits, k_invalid_actions),
+      k_indices=k_indices
+  )
 
   # Generating Gumbel.
   rng_key, gumbel_rng = jax.random.split(rng_key)
   gumbel = gumbel_scale * jax.random.gumbel(
-      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+      gumbel_rng, shape=k_logits.shape, dtype=k_logits.dtype)
 
   # Searching.
   extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=gumbel)
@@ -1984,9 +1995,10 @@ def gumbel_muzero_policy_bnk(
           action_selection.gumbel_muzero_interior_action_selection,
           qtransform=qtransform,
       ),
+      num_k_actions=num_k_actions,
       num_simulations=num_simulations,
       max_depth=max_depth,
-      invalid_actions=invalid_actions,
+      invalid_actions=k_invalid_actions,
       extra_data=extra_data)
   summary = search_tree.summary()
 
@@ -2001,13 +2013,13 @@ def gumbel_muzero_policy_bnk(
       search_tree, search_tree.ROOT_INDEX)
   # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
-      considered_visit, gumbel, root.prior_logits, completed_qvalues,
+      considered_visit, gumbel, k_logits, completed_qvalues,
       summary.visit_counts)
-  # jax.debug.print("[gumbel reg] to_argmax: {}", to_argmax)
-  action = action_selection.masked_argmax(to_argmax, invalid_actions)
 
-
-
+  ### [BNK]
+  batch_range = jnp.arange(batch_size)
+  k_action = action_selection.masked_argmax(to_argmax, k_invalid_actions)
+  action = k_indices[batch_range, k_action]
 
   # Update the search_tree with completed_qvalues and to_argmax
   search_tree = search_tree.replace(
@@ -2017,16 +2029,17 @@ def gumbel_muzero_policy_bnk(
 
   # Producing action_weights usable to train the policy network.
   completed_search_logits = _mask_invalid_actions(
-      root.prior_logits + completed_qvalues, invalid_actions)
+      k_logits + completed_qvalues, k_invalid_actions) # [B, K]
 
-  action_weights = jax.nn.softmax(completed_search_logits)
-  # return base.PolicyOutput(
-  #     action=action,
-  #     action_weights=action_weights,
-  #     search_tree=search_tree)
+  ### [BNK]
+  k_action_weights = jax.nn.softmax(completed_search_logits)  # [B, K]
+  full_weights = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
+
+  ### Put the K probs back into A slots; others stay 0
+  action_weights = full_weights.at[batch_range, k_indices].set(k_action_weights)  # [B, A]
 
   # [bfs] for debugging
-  search_logits= root.prior_logits + completed_qvalues # for debugging
+  search_logits= k_logits + completed_qvalues # for debugging
   children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
   children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
 
@@ -2040,7 +2053,7 @@ def gumbel_muzero_policy_bnk(
       search_logits=search_logits,
       children_values=children_values,
       root_gumbel=gumbel,
-      root_prior_logits=root.prior_logits,
+      root_prior_logits=k_logits,
       final_qvalues=completed_qvalues,
       final_score=to_argmax,
   )

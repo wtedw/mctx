@@ -36,6 +36,7 @@ def search_bnk(
     recurrent_fn: base.RecurrentFn,
     root_action_selection_fn: base.RootActionSelectionFn,
     interior_action_selection_fn: base.InteriorActionSelectionFn,
+    num_k_actions: int,
     num_simulations: int,
     max_depth: Optional[int] = None,
     invalid_actions: Optional[chex.Array] = None,
@@ -80,19 +81,20 @@ def search_bnk(
     simulate_keys = jax.random.split(simulate_key, batch_size)
 
     # Select parent/action according to the policy for this simulation.
-    parent_index, action = simulate(
+    parent_index, k_action = simulate(
         simulate_keys, tree, action_selection_fn, max_depth
     )
 
     # Node created at sim i will have index i+1; 0 is root.
-    next_node_index = tree.children_index[batch_range, parent_index, action]
+    next_node_index = tree.children_index[batch_range, parent_index, k_action]
     next_node_index = jnp.where(
         next_node_index == Tree.UNVISITED, i + 1, next_node_index
     )
+    action = tree.children_k_indices[batch_range, parent_index, k_action]
 
     # Expand the chosen leaf; recurrent_fn uses params and expand_key.
     tree = expand(
-        params, expand_key, tree, recurrent_fn, parent_index, action, next_node_index
+        params, expand_key, tree, recurrent_fn, parent_index, action, k_action, next_node_index, num_k_actions
     )
 
     # Backpropagate value/visits.
@@ -150,9 +152,9 @@ def simulate(
     # Preparing the next simulation state.
     node_index = state.next_node_index
     rng_key, action_selection_key = jax.random.split(state.rng_key)
-    action = action_selection_fn(action_selection_key, tree, node_index,
+    k_action = action_selection_fn(action_selection_key, tree, node_index,
                                  state.depth)
-    next_node_index = tree.children_index[node_index, action]
+    next_node_index = tree.children_index[node_index, k_action]
     # The returned action will be visited.
     depth = state.depth + 1
     is_before_depth_cutoff = depth < max_depth
@@ -161,7 +163,7 @@ def simulate(
     return _SimulationState(  # pytype: disable=wrong-arg-types  # jax-types
         rng_key=rng_key,
         node_index=node_index,
-        action=action,
+        action=k_action,
         next_node_index=next_node_index,
         depth=depth,
         is_continuing=is_continuing)
@@ -191,7 +193,9 @@ def expand(
     recurrent_fn: base.RecurrentFn,
     parent_index: chex.Array,
     action: chex.Array,
-    next_node_index: chex.Array) -> Tree[T]:
+    k_action: chex.Array,
+    next_node_index: chex.Array,
+    num_k_actions: int) -> Tree[T]:
   """Create and evaluate child nodes from given nodes and unvisited actions.
 
   Args:
@@ -205,6 +209,7 @@ def expand(
     parent_index: the index of the parent node, from which the action will be
       expanded. Shape `[B]`.
     action: the action to expand. Shape `[B]`.
+    k_action: the k index that maps to the real action. Shape `[B]`.
     next_node_index: the index of the newly expanded node. This can be the index
       of an existing node, if `max_depth` is reached. Shape `[B]`.
 
@@ -213,7 +218,7 @@ def expand(
   """
   batch_size = tree_lib.infer_batch_size(tree)
   batch_range = jnp.arange(batch_size)
-  chex.assert_shape([parent_index, action, next_node_index], (batch_size,))
+  chex.assert_shape([parent_index, action, k_action, next_node_index], (batch_size,))
 
   # Retrieve states for nodes to be evaluated.
   embedding = jax.tree.map(
@@ -221,24 +226,25 @@ def expand(
 
   # Evaluate and create a new node.
   step, embedding = recurrent_fn(params, rng_key, action, embedding)
-  chex.assert_shape(step.prior_logits, [batch_size, tree.num_actions])
+  k_logits, k_indices = jax.lax.top_k(step.prior_logits, k=num_k_actions)
+  chex.assert_shape(k_logits, [batch_size, tree.num_actions])
   chex.assert_shape(step.reward, [batch_size])
   chex.assert_shape(step.discount, [batch_size])
   chex.assert_shape(step.value, [batch_size])
   tree = update_tree_node(
-      tree, next_node_index, step.prior_logits, step.value, embedding)
+      tree, next_node_index, k_indices, k_logits, step.value, embedding)
 
   # Return updated tree topology.
   return tree.replace(
       children_index=batch_update(
-          tree.children_index, next_node_index, parent_index, action),
+          tree.children_index, next_node_index, parent_index, k_action),
       children_rewards=batch_update(
-          tree.children_rewards, step.reward, parent_index, action),
+          tree.children_rewards, step.reward, parent_index, k_action),
       children_discounts=batch_update(
-          tree.children_discounts, step.discount, parent_index, action),
+          tree.children_discounts, step.discount, parent_index, k_action),
       parents=batch_update(tree.parents, parent_index, next_node_index),
       action_from_parent=batch_update(
-          tree.action_from_parent, action, next_node_index))
+          tree.action_from_parent, k_action, next_node_index))
 
 
 @jax.vmap
@@ -264,21 +270,21 @@ def backward(
     tree, leaf_value, index = loop_state
     parent = tree.parents[index]
     count = tree.node_visits[parent]
-    action = tree.action_from_parent[index]
-    reward = tree.children_rewards[parent, action]
-    leaf_value = reward + tree.children_discounts[parent, action] * leaf_value
+    k_action = tree.action_from_parent[index]
+    reward = tree.children_rewards[parent, k_action]
+    leaf_value = reward + tree.children_discounts[parent, k_action] * leaf_value
     parent_value = (
         tree.node_values[parent] * count + leaf_value) / (count + 1.0)
     children_values = tree.node_values[index]
-    children_counts = tree.children_visits[parent, action] + 1
+    children_counts = tree.children_visits[parent, k_action] + 1
 
     tree = tree.replace(
         node_values=update(tree.node_values, parent_value, parent),
         node_visits=update(tree.node_visits, count + 1, parent),
         children_values=update(
-            tree.children_values, children_values, parent, action),
+            tree.children_values, children_values, parent, k_action),
         children_visits=update(
-            tree.children_visits, children_counts, parent, action))
+            tree.children_visits, children_counts, parent, k_action))
 
     return tree, leaf_value, parent
 
@@ -301,6 +307,7 @@ batch_update = jax.vmap(update)
 def update_tree_node(
     tree: Tree[T],
     node_index: chex.Array,
+    k_indices: Any,
     prior_logits: chex.Array,
     value: chex.Array,
     embedding: chex.Array) -> Tree[T]:
@@ -308,6 +315,7 @@ def update_tree_node(
 
   Args:
     tree: `Tree` to whose node is to be updated.
+    k_indices: the k indices of the expanded node. Shape `[B, K]`.
     node_index: the index of the expanded node. Shape `[B]`.
     prior_logits: the prior logits to fill in for the new node, of shape
       `[B, num_actions]`.
@@ -319,13 +327,15 @@ def update_tree_node(
   """
   batch_size = tree_lib.infer_batch_size(tree)
   batch_range = jnp.arange(batch_size)
-  chex.assert_shape(prior_logits, (batch_size, tree.num_actions))
+  chex.assert_shape([prior_logits, k_indices], (batch_size, tree.num_actions))
 
   # When using max_depth, a leaf can be expanded multiple times.
   new_visit = tree.node_visits[batch_range, node_index] + 1
   updates = dict(  # pylint: disable=use-dict-literal
       children_prior_logits=batch_update(
           tree.children_prior_logits, prior_logits, node_index),
+      children_k_indices=batch_update(
+          tree.children_k_indices, k_indices, node_index),
       raw_values=batch_update(
           tree.raw_values, value, node_index),
       node_values=batch_update(
@@ -342,17 +352,16 @@ def update_tree_node(
 def instantiate_tree_from_root(
     root: base.RootFnOutput,
     num_simulations: int,
-    max_k_actions: int,
     root_invalid_actions: chex.Array,
     extra_data: Any) -> Tree:
   """Initializes tree state at search root."""
   chex.assert_rank(root.prior_logits, 2)
-  batch_size, _ = root.prior_logits.shape
+  batch_size, num_actions = root.prior_logits.shape
   chex.assert_shape(root.value, [batch_size])
   num_nodes = num_simulations + 1
   data_dtype = root.value.dtype
   batch_node = (batch_size, num_nodes)
-  batch_node_action = (batch_size, num_nodes, max_k_actions)
+  batch_node_action = (batch_size, num_nodes, num_actions)
 
   def _zeros(x):
     return jnp.zeros(batch_node + x.shape[1:], dtype=x.dtype)
@@ -369,6 +378,8 @@ def instantiate_tree_from_root(
           batch_node_action, Tree.UNVISITED, dtype=jnp.int32),
       children_prior_logits=jnp.zeros(
           batch_node_action, dtype=root.prior_logits.dtype),
+      children_k_indices=jnp.full(
+          batch_node_action, -1, dtype=jnp.int16),
       children_values=jnp.zeros(batch_node_action, dtype=data_dtype),
       children_visits=jnp.zeros(batch_node_action, dtype=jnp.int32),
       children_rewards=jnp.zeros(batch_node_action, dtype=data_dtype),
@@ -379,5 +390,5 @@ def instantiate_tree_from_root(
 
   root_index = jnp.full([batch_size], Tree.ROOT_INDEX)
   tree = update_tree_node(
-      tree, root_index, root.prior_logits, root.value, root.embedding)
+      tree, root_index, root.k_indices, root.prior_logits, root.value, root.embedding)
   return tree
