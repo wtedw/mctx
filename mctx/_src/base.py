@@ -119,6 +119,10 @@ class PolicyOutput(Generic[T]):
   mixed_value: Optional[Any] = None
   maxvisit: Optional[Any] = None
 
+  # For BNK
+  bnk_visit_probs: Optional[Any] = None
+  bnk_k_indices: Optional[Any] = None
+
 
 @chex.dataclass(frozen=True)
 class DecisionRecurrentFnOutput:

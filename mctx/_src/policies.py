@@ -2057,6 +2057,9 @@ def gumbel_muzero_policy_bnk(
       root_prior_logits=k_logits,
       final_qvalues=completed_qvalues,
       final_score=to_argmax,
+      raw_value=root.value,
+      bnk_visit_probs=summary.visit_probs,
+      bnk_k_indices=k_indices,
   )
 
 
