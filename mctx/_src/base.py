@@ -122,6 +122,7 @@ class PolicyOutput(Generic[T]):
   # For BNK
   bnk_action_weights: Optional[Any] = None
   bnk_visit_probs: Optional[Any] = None
+  bnk_visit_counts: Optional[Any] = None
   bnk_k_indices: Optional[Any] = None
 
 

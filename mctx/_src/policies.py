@@ -2060,6 +2060,7 @@ def gumbel_muzero_policy_bnk(
       raw_value=root.value,
       bnk_action_weights=k_action_weights,
       bnk_visit_probs=summary.visit_probs,
+      bnk_visit_counts=summary.visit_counts
       bnk_k_indices=k_indices,
   )
 
