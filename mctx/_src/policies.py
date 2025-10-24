@@ -1567,6 +1567,7 @@ def gumbel_muzero_policy(
       root_prior_logits=root.prior_logits,
       final_qvalues=completed_qvalues,
       final_score=to_argmax,
+      raw_value=root.value,
   )
 
 def gumbel_muzero_policy2(
