@@ -2142,7 +2142,7 @@ def gumbel_muzero_policy_opt(
 
   # Searching.
   extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=gumbel)
-  search_tree = search_opt.search(
+  search_tree = search_opt.search_opt(
       params=params,
       rng_key=rng_key,
       root=root,

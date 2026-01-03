@@ -28,7 +28,7 @@ Tree = tree_lib.Tree
 T = TypeVar("T")
 
 
-def search(
+def search_opt(
     params: base.Params,
     rng_key: chex.PRNGKey,
     *,
