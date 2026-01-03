@@ -36,6 +36,7 @@ from mctx._src.policies import gumbel_muzero_policy
 from mctx._src.policies import gumbel_muzero_policy2
 from mctx._src.policies import gumbel_muzero_policy3
 from mctx._src.policies import gumbel_muzero_policy_bnk
+from mctx._src.policies import gumbel_muzero_policy_opt
 from mctx._src.policies import muzero_policy
 from mctx._src.policies import stochastic_muzero_policy
 from mctx._src.qtransforms import qtransform_by_min_max
@@ -44,6 +45,7 @@ from mctx._src.qtransforms import qtransform_completed_by_mix_value
 from mctx._src.search import search
 from mctx._src.search2 import search2
 from mctx._src.search_bnk import search_bnk
+from mctx._src.search_opt import search_opt
 from mctx._src.tree import Tree
 
 __version__ = "0.0.5"
@@ -65,6 +67,7 @@ __all__ = (
     "gumbel_muzero_policy",
     "gumbel_muzero_policy2",
     "gumbel_muzero_policy3",
+    "gumbel_muzero_policy_opt",
     "gumbel_muzero_policy_bnk",
     "gumbel_muzero_policy_bfs",
     "gumbel_muzero_policy_bfs2",
@@ -79,6 +82,7 @@ __all__ = (
     "search",
     "search2",
     "search_bnk",
+    "search_opt",
     "stochastic_muzero_policy",
 )
 
