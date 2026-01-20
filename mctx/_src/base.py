@@ -115,6 +115,7 @@ class PolicyOutput(Generic[T]):
   rescaled_qvalues: Optional[Any] = None
   rescaled_qvalues2: Optional[Any] = None
   visit_counts: Optional[Any] = None
+  visit_probs: Optional[Any] = None
   raw_value: Optional[Any] = None
   mixed_value: Optional[Any] = None
   maxvisit: Optional[Any] = None

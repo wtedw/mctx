@@ -2216,6 +2216,10 @@ def gumbel_muzero_policy_opt(
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
 
   if rehydrate_fields:
+    full_visit_probs = jnp.zeros((batch_size, num_actions), dtype=summary.visit_probs.dtype)
+    full_visit_probs = full_visit_probs.at[batch_idx, k_indices].set(summary.visit_probs)
+    full_visit_counts = jnp.zeros((batch_size, num_actions), dtype=summary.visit_counts.dtype)
+    full_visit_counts = full_visit_counts.at[batch_idx, k_indices].set(summary.visit_counts)
     full_completed_qvalues = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_completed_qvalues = full_completed_qvalues.at[batch_idx, k_indices].set(completed_qvalues)  # [B, A]
     full_search_logits = bna_prior_logits + full_completed_qvalues
@@ -2227,6 +2231,8 @@ def gumbel_muzero_policy_opt(
         # always return non-k versions
         action=action,
         action_weights=action_weights,
+        visit_probs=full_visit_probs,
+        visit_counts=full_visit_counts,
         search_tree=search_tree,
         search_logits=full_search_logits,
         children_values=full_children_values,
