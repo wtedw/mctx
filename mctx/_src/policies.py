@@ -2241,7 +2241,7 @@ def gumbel_muzero_policy_opt(
         bnk_visit_probs=summary.visit_probs,
         bnk_visit_counts=summary.visit_counts,
         bnk_k_indices=k_indices,
-        k_prior_logits=k_logits,
+        k_root_prior_logits=k_logits,
         k_search_logits=search_logits,
     )
   # jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
