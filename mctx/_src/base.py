@@ -125,6 +125,8 @@ class PolicyOutput(Generic[T]):
   bnk_visit_probs: Optional[Any] = None
   bnk_visit_counts: Optional[Any] = None
   bnk_k_indices: Optional[Any] = None
+  k_prior_logits: Optional[Any] = None
+  k_search_logits: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)

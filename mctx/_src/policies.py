@@ -2211,7 +2211,7 @@ def gumbel_muzero_policy_opt(
   action_weights = full_weights.at[batch_idx, k_indices].set(k_action_weights)  # [B, A]
 
   # [bfs] for debugging
-  search_logits= k_logits + completed_qvalues # for debugging
+  search_logits = k_logits + completed_qvalues # for debugging
   k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
 
@@ -2235,11 +2235,14 @@ def gumbel_muzero_policy_opt(
         final_qvalues=full_completed_qvalues,
         final_score=full_final_score,
         raw_value=root.value,
+        # k arrays for debugging and during maybe_exploration
         bnk_action = k_action,
         bnk_action_weights=k_action_weights,
         bnk_visit_probs=summary.visit_probs,
         bnk_visit_counts=summary.visit_counts,
         bnk_k_indices=k_indices,
+        k_prior_logits=k_logits,
+        k_search_logits=search_logits,
     )
   # jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
   # jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
