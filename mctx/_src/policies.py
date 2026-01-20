@@ -2081,6 +2081,7 @@ def gumbel_muzero_policy_opt(
     qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
+    rehydrate_fields: bool = False,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2117,13 +2118,25 @@ def gumbel_muzero_policy_opt(
       valid actions is smaller.
     gumbel_scale: scale for the Gumbel noise. Evalution on perfect-information
       games can use gumbel_scale=0.0.
+    rehydrate_fields: Boolean for whether to fill in the n_actions array
+      fields of PolicyOutput instead of returning k sized arrays
 
   Returns:
     `PolicyOutput` containing the proposed action, action_weights and the used
     search tree.
   """
+
+  bna_prior_logits = root.prior_logits
   batch_size, num_actions = root.prior_logits.shape
-  k_logits, k_indices = jax.lax.top_k(root.prior_logits, k=num_k_actions)
+
+  # Generating Gumbel.
+  rng_key, gumbel_rng = jax.random.split(rng_key)
+  gumbel = gumbel_scale * jax.random.gumbel(
+      gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
+
+  k_logits, k_indices = jax.lax.top_k(root.prior_logits + gumbel, k=num_k_actions)
+  k_gumbel = jnp.take_along_axis(gumbel, k_indices, axis=-1)
+
   if invalid_actions is None:
       k_invalid_actions = None
   else:
@@ -2135,13 +2148,9 @@ def gumbel_muzero_policy_opt(
       k_indices=k_indices
   )
 
-  # Generating Gumbel.
-  rng_key, gumbel_rng = jax.random.split(rng_key)
-  gumbel = gumbel_scale * jax.random.gumbel(
-      gumbel_rng, shape=k_logits.shape, dtype=k_logits.dtype)
 
   # Searching.
-  extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=gumbel)
+  extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=k_gumbel)
   search_tree = search_opt.search_opt(
       params=params,
       rng_key=rng_key,
@@ -2175,7 +2184,7 @@ def gumbel_muzero_policy_opt(
       search_tree, search_tree.ROOT_INDEX)
   # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
-      considered_visit, gumbel, k_logits, completed_qvalues,
+      considered_visit, k_gumbel, k_logits, completed_qvalues,
       summary.visit_counts)
 
   ### [BNK]
@@ -2203,29 +2212,56 @@ def gumbel_muzero_policy_opt(
 
   # [bfs] for debugging
   search_logits= k_logits + completed_qvalues # for debugging
-  children_indices = search_tree.children_index[:, 0]  # [B, num_actions]
-  children_values = jnp.take_along_axis(search_tree.node_values, children_indices, axis=1)  # [B, num_actions]
+  k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
+  k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
 
+  if rehydrate_fields:
+    full_completed_qvalues = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
+    full_completed_qvalues = full_completed_qvalues.at[batch_idx, k_indices].set(completed_qvalues)  # [B, A]
+    full_search_logits = bna_prior_logits + full_completed_qvalues
+    full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
+    full_children_values = full_children_values.at[batch_idx, k_children_indices].set(k_children_values)  # [B, A]
+    full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
+    full_final_score = full_final_score.at[batch_idx, k_children_indices].set(to_argmax)
+    return base.PolicyOutput(
+        # always return non-k versions
+        action=action,
+        action_weights=action_weights,
+        search_tree=search_tree,
+        search_logits=full_search_logits,
+        children_values=full_children_values,
+        root_gumbel=gumbel,
+        root_prior_logits=bna_prior_logits,
+        final_qvalues=full_completed_qvalues,
+        final_score=full_final_score,
+        raw_value=root.value,
+        bnk_action = k_action,
+        bnk_action_weights=k_action_weights,
+        bnk_visit_probs=summary.visit_probs,
+        bnk_visit_counts=summary.visit_counts,
+        bnk_k_indices=k_indices,
+    )
   # jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
   # jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
-
-  return base.PolicyOutput(
-      action=action,
-      action_weights=action_weights,
-      search_tree=search_tree,
-      search_logits=search_logits,
-      children_values=children_values,
-      root_gumbel=gumbel,
-      root_prior_logits=k_logits,
-      final_qvalues=completed_qvalues,
-      final_score=to_argmax,
-      raw_value=root.value,
-      bnk_action = k_action,
-      bnk_action_weights=k_action_weights,
-      bnk_visit_probs=summary.visit_probs,
-      bnk_visit_counts=summary.visit_counts,
-      bnk_k_indices=k_indices,
-  )
+  else:
+    return base.PolicyOutput(
+        action=action,
+        action_weights=action_weights,
+        # k arrays
+        search_tree=search_tree,
+        search_logits=search_logits,
+        children_values=k_children_values,
+        root_gumbel=k_gumbel,
+        root_prior_logits=k_logits,
+        final_qvalues=completed_qvalues,
+        final_score=to_argmax,
+        raw_value= root.value,
+        bnk_action = k_action,
+        bnk_action_weights = k_action_weights,
+        bnk_visit_probs = summary.visit_probs,
+        bnk_visit_counts = summary.visit_counts,
+        bnk_k_indices = k_indices,
+    )
 
 def stochastic_muzero_policy(
     params: chex.ArrayTree,
