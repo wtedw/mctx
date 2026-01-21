@@ -2223,8 +2223,8 @@ def gumbel_muzero_policy_opt(
     full_completed_qvalues = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_completed_qvalues = full_completed_qvalues.at[batch_idx, k_indices].set(completed_qvalues)  # [B, A]
     full_search_logits = bna_prior_logits + full_completed_qvalues
-    full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
-    full_children_values = full_children_values.at[batch_idx, k_children_indices].set(k_children_values)  # [B, A]
+    full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_children_values.dtype)
+    full_children_values = full_children_values.at[batch_idx, k_indices].set(k_children_values)
     full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_final_score = full_final_score.at[batch_idx, k_children_indices].set(to_argmax)
     return base.PolicyOutput(
@@ -2235,7 +2235,7 @@ def gumbel_muzero_policy_opt(
         visit_counts=full_visit_counts,
         search_tree=search_tree,
         search_logits=full_search_logits,
-        children_values=full_children_values,
+        children_values=full_children_values, # [bug] k_children_indices not right
         root_gumbel=gumbel,
         root_prior_logits=bna_prior_logits,
         final_qvalues=full_completed_qvalues,
