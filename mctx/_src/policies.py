@@ -825,7 +825,7 @@ def gumbel_muzero_policy_sh2(
 
       # Add stable signal to the prior
       final_advantages = (muesli_beta * norm_advantages)
-      search_logits = root.prior_logits + advantages
+      search_logits = root.prior_logits + final_advantages
   else:
       final_advantages = completed_q
       search_logits = root.prior_logits + completed_q
