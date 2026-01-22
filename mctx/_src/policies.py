@@ -2271,7 +2271,7 @@ def gumbel_muzero_policy_opt(
         root_prior_logits=bna_prior_logits,
         final_qvalues=full_completed_qvalues,
         final_score=full_final_score,
-        advantages=advantages,
+        advantages=full_advantages,
         raw_value=root.value,
         # k arrays for debugging and during maybe_exploration
         bnk_action = k_action,
