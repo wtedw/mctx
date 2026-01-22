@@ -2082,6 +2082,8 @@ def gumbel_muzero_policy_opt(
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
     rehydrate_fields: bool = False,
+    use_muesli: bool = False,
+    muesli_beta: float = 2.0,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2198,9 +2200,36 @@ def gumbel_muzero_policy_opt(
       to_argmax=to_argmax
   )
 
-  # Producing action_weights usable to train the policy network.
-  completed_search_logits = _mask_invalid_actions(
-      k_logits + completed_qvalues, k_invalid_actions) # [B, K]
+  if use_muesli:
+      # [Muesli Target Logic]
+      # 1. Calculate v_pi (Expected value of policy on these K actions)
+      # Note: k_logits are already masked, so invalid actions contribute 0 prob.
+      k_probs = jax.nn.softmax(k_logits)
+      v_pi = jnp.sum(k_probs * completed_qvalues, axis=-1, keepdims=True)
+
+      # 2. Calculate Advantages (Scaling factors in completed_qvalues cancel out later)
+      advantages = completed_qvalues - v_pi
+
+      # 3. Normalize (The cancellation happens here)
+      adv_mean = jnp.mean(advantages, axis=-1, keepdims=True)
+      adv_std = jnp.std(advantages, axis=-1, keepdims=True)
+      norm_advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+
+      # 4. Clip and construct target
+      norm_advantages = jnp.clip(norm_advantages, -5.0, 5.0)
+
+      # We add the stable signal to the logits
+      final_advantages = (muesli_beta * norm_advantages)
+      completed_search_logits = k_logits + final_advantages
+
+      # Mask again to ensure safety
+      completed_search_logits = _mask_invalid_actions(
+          completed_search_logits, k_invalid_actions)
+  else:
+    # Producing action_weights usable to train the policy network.
+      final_advantages = completed_qvalues
+      completed_search_logits = _mask_invalid_actions(
+          k_logits + final_advantages, k_invalid_actions) # [B, K]
 
   ### [BNK]
   k_action_weights = jax.nn.softmax(completed_search_logits)  # [B, K]
@@ -2222,6 +2251,8 @@ def gumbel_muzero_policy_opt(
     full_visit_counts = full_visit_counts.at[batch_idx, k_indices].set(summary.visit_counts)
     full_completed_qvalues = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_completed_qvalues = full_completed_qvalues.at[batch_idx, k_indices].set(completed_qvalues)  # [B, A]
+    full_advantages = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
+    full_advantages = full_advantages.at[batch_idx, k_indices].set(final_advantages)  # [B, A]
     full_search_logits = bna_prior_logits + full_completed_qvalues
     full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_children_values.dtype)
     full_children_values = full_children_values.at[batch_idx, k_indices].set(k_children_values)
@@ -2240,6 +2271,7 @@ def gumbel_muzero_policy_opt(
         root_prior_logits=bna_prior_logits,
         final_qvalues=full_completed_qvalues,
         final_score=full_final_score,
+        advantages=advantages,
         raw_value=root.value,
         # k arrays for debugging and during maybe_exploration
         bnk_action = k_action,
@@ -2264,6 +2296,7 @@ def gumbel_muzero_policy_opt(
         root_prior_logits=k_logits,
         final_qvalues=completed_qvalues,
         final_score=to_argmax,
+        advantages=final_advantages,
         raw_value= root.value,
         bnk_action = k_action,
         bnk_action_weights = k_action_weights,

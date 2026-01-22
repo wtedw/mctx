@@ -129,6 +129,8 @@ class PolicyOutput(Generic[T]):
   k_root_prior_logits: Optional[Any] = None
   k_search_logits: Optional[Any] = None
 
+  advantages: Optional[Any] = None
+
 
 @chex.dataclass(frozen=True)
 class DecisionRecurrentFnOutput:
