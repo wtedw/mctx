@@ -419,6 +419,8 @@ def gumbel_muzero_policy_sh2(
     maxvisit_init: chex.Numeric = 50.0,
     rescale_values: bool = True,
     epsilon: chex.Numeric = 1e-8,
+    use_muesli: bool = False,
+    muesli_beta: float = 2.0,
 ) -> base.PolicyOutput[None]:
   """
   Sequential-Halving BFS (2 rungs).
@@ -799,9 +801,37 @@ def gumbel_muzero_policy_sh2(
   final_score = root_gumbel + root.prior_logits + completed_q
   best_a = action_selection.masked_argmax(final_score, invalid_actions)
 
-  # Soft-label policy targets ---------------------------------------
-  search_logits = _mask_invalid_actions(root.prior_logits + completed_q,
-                                        invalid_actions)
+  if use_muesli:
+      # [Muesli Target Logic]
+      # 1. Calculate V_pi (Baseline)
+      # root.prior_logits are already masked (step 0), so invalid actions have 0 prob.
+      prior_probs = jax.nn.softmax(root.prior_logits)
+
+      # Expected value of the search result under the prior policy
+      v_pi = jnp.sum(prior_probs * completed_q, axis=-1, keepdims=True)
+
+      # 2. Calculate Advantages
+      # completed_q contains the visit_count scaling, but that's fine because...
+      advantages = completed_q - v_pi
+
+      # 3. Normalize Advantages (Scale Invariance kicks in here)
+      # The large scaling factor in completed_q cancels out during division.
+      adv_mean = jnp.mean(advantages, axis=-1, keepdims=True)
+      adv_std = jnp.std(advantages, axis=-1, keepdims=True)
+      norm_advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+
+      # 4. Clip and Construct Target
+      norm_advantages = jnp.clip(norm_advantages, -5.0, 5.0)
+
+      # Add stable signal to the prior
+      final_advantages = (muesli_beta * norm_advantages)
+      search_logits = root.prior_logits + advantages
+  else:
+      final_advantages = completed_q
+      search_logits = root.prior_logits + completed_q
+
+  # Final mask to ensure invalid actions are -inf
+  search_logits = _mask_invalid_actions(search_logits, invalid_actions)
   action_weights = jax.nn.softmax(search_logits)
 
   # return base.PolicyOutput(
@@ -838,7 +868,7 @@ def gumbel_muzero_policy_sh2(
       # after q‑transform
       final_qvalues    = completed_q,                   # [B, A]
       final_score      = final_score,                   # [B, A]
-
+      advantages       = final_advantages,
       # internals of q‑transform
       raw_value        = raw_value,                     # [B]
       mixed_value      = mixed_value,                   # [B]
