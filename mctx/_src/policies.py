@@ -2240,7 +2240,7 @@ def gumbel_muzero_policy_opt(
   action_weights = full_weights.at[batch_idx, k_indices].set(k_action_weights)  # [B, A]
 
   # [bfs] for debugging
-  search_logits = k_logits + completed_qvalues # for debugging
+  search_logits = k_logits + final_advantages # for debugging
   k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
 
@@ -2253,7 +2253,7 @@ def gumbel_muzero_policy_opt(
     full_completed_qvalues = full_completed_qvalues.at[batch_idx, k_indices].set(completed_qvalues)  # [B, A]
     full_advantages = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_advantages = full_advantages.at[batch_idx, k_indices].set(final_advantages)  # [B, A]
-    full_search_logits = bna_prior_logits + final_advantages
+    full_search_logits = bna_prior_logits + full_advantages
     full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_children_values.dtype)
     full_children_values = full_children_values.at[batch_idx, k_indices].set(k_children_values)
     full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
