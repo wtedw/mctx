@@ -175,7 +175,7 @@ def muzero_policy(
 
 #   rng_key, _rng = jax.random.split(rng_key)
 #   root_flat_keys    = jax.random.split(_rng, Bx16).reshape(Bx16, -1)
-#   root_flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, axis=0),
+#   root_flat_embed   = jax.tree.map(lambda x: jnp.repeat(x, top_k_first, axis=0),
 #                               root.embedding)
 
 #   layer1_flat_out, layer1_flat_emb = recurrent_fn(params, root_flat_keys, root_flat_actions,
@@ -184,8 +184,8 @@ def muzero_policy(
 #   def unflat(x):                                          # helper unchanged
 #       return x.reshape(B, top_k_first, *x.shape[1:])
 
-#   layer1_out     = jax.tree_map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
-#   layer1_embeds  = jax.tree_map(unflat, layer1_flat_emb)
+#   layer1_out     = jax.tree.map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
+#   layer1_embeds  = jax.tree.map(unflat, layer1_flat_emb)
 #   layer1_qvalues = layer1_out.reward + layer1_out.discount * layer1_out.value
 #   layer1_visits  = jnp.ones_like(layer1_qvalues, dtype=jnp.int32) # visits = 1
 
@@ -279,12 +279,12 @@ def muzero_policy(
 #     picked = jnp.take_along_axis(x, idx, axis=1)   # [B, 8, …]   (or [B, 8])
 #     return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
 
-#   # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
-#   layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+#   # parent_emb_flat = jax.tree.map(gather_parents_leaf, layer1_embeds)
+#   layer2_parent_emb_flat = jax.tree.map(gather_parents_leaf, layer1_embeds)
 
 #   flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, layer2_parent_emb_flat) # [Bx8]
 #   def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
-#   layer2 = jax.tree_map(unflat2, flat2_out) # [B, 8]
+#   layer2 = jax.tree.map(unflat2, flat2_out) # [B, 8]
 
 #   # 2‑e) compute q₂ only for *legal* parents --------------------------------
 #   q2_leaf = layer2.reward + layer2.discount * layer2.value                  # [B,8]
@@ -454,7 +454,7 @@ def gumbel_muzero_policy_sh2(
 
   rng_key, _rng = jax.random.split(rng_key)
   root_flat_keys    = jax.random.split(_rng, Bx16).reshape(Bx16, -1)
-  root_flat_embed   = jax.tree_map(lambda x: jnp.repeat(x, top_k_first, axis=0),
+  root_flat_embed   = jax.tree.map(lambda x: jnp.repeat(x, top_k_first, axis=0),
                               root.embedding)
 
   layer1_flat_out, layer1_flat_emb = recurrent_fn(params, root_flat_keys, root_flat_actions,
@@ -463,8 +463,8 @@ def gumbel_muzero_policy_sh2(
   def unflat(x):                                          # helper unchanged
       return x.reshape(B, top_k_first, *x.shape[1:])
 
-  layer1_out     = jax.tree_map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
-  layer1_embeds  = jax.tree_map(unflat, layer1_flat_emb)
+  layer1_out     = jax.tree.map(unflat, layer1_flat_out) # [Bx16,] -> [B, 16]
+  layer1_embeds  = jax.tree.map(unflat, layer1_flat_emb)
   layer1_qvalues = layer1_out.reward + layer1_out.discount * layer1_out.value
   layer1_visits  = jnp.ones_like(layer1_qvalues, dtype=jnp.int32) # visits = 1
 
@@ -700,12 +700,12 @@ def gumbel_muzero_policy_sh2(
   #   return picked.reshape(Bx8, *x.shape[2:])       # [B*8, …]
 
 
-  # parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
-  layer2_parent_emb_flat = jax.tree_map(gather_parents_leaf, layer1_embeds)
+  # parent_emb_flat = jax.tree.map(gather_parents_leaf, layer1_embeds)
+  layer2_parent_emb_flat = jax.tree.map(gather_parents_leaf, layer1_embeds)
 
   flat2_out, _ = recurrent_fn(params, leaf_keys, leaf_actions, layer2_parent_emb_flat) # [Bx8]
   def unflat2(x): return x.reshape(B, top_k_second, *x.shape[1:])
-  layer2 = jax.tree_map(unflat2, flat2_out) # [B, 8]
+  layer2 = jax.tree.map(unflat2, flat2_out) # [B, 8]
 
   # 2‑e) compute q₂ only for *legal* parents --------------------------------
   q2_leaf = layer2.reward + layer2.discount * layer2.value                  # [B,8]
@@ -970,7 +970,7 @@ def gumbel_muzero_policy_bfs3(
     # x has shape [B, ...], replicate each batch item top_k_first times.
     return jnp.repeat(x, top_k_first, axis=0)
 
-  batched_root_embedding = jax.tree_map(replicate_leaf, root.embedding)
+  batched_root_embedding = jax.tree.map(replicate_leaf, root.embedding)
 
   # Now gather each action from flat_idx, pass to recurrent_fn
   flat_actions = flat_idx  # shape [B*K]
@@ -983,8 +983,8 @@ def gumbel_muzero_policy_bfs3(
   # Reshape back to [B, K, ...]
   def unflatten(x):
     return x.reshape(batch_size, top_k_first, *x.shape[1:])
-  # child_outputs = jax.tree_map(unflatten, flat_outputs)
-  # child_embeddings = jax.tree_map(unflatten, flat_child_embed)
+  # child_outputs = jax.tree.map(unflatten, flat_outputs)
+  # child_embeddings = jax.tree.map(unflatten, flat_child_embed)
   # # child_outputs.reward, child_outputs.value, child_outputs.prior_logits, child_outputs.discount
 
 
@@ -992,7 +992,7 @@ def gumbel_muzero_policy_bfs3(
 
   # --- 8. Re-compute completed Q–values at root.
   # final_qvalues has shape [B, num_actions]
-  layer1_outputs = jax.tree_map(unflatten, flat_outputs)
+  layer1_outputs = jax.tree.map(unflatten, flat_outputs)
   layer1_qvalues = layer1_outputs.reward + layer1_outputs.discount * layer1_outputs.value # [B, K]
 
   batch_idx = jnp.arange(batch_size)[:, None]            # shape [B, 1]
@@ -1159,7 +1159,7 @@ def gumbel_muzero_policy_bfs2(
     # x has shape [B, ...], replicate each batch item top_k_first times.
     return jnp.repeat(x, top_k_first, axis=0)
 
-  batched_root_embedding = jax.tree_map(replicate_leaf, root.embedding)
+  batched_root_embedding = jax.tree.map(replicate_leaf, root.embedding)
 
   # Now gather each action from flat_idx, pass to recurrent_fn
   flat_actions = flat_idx  # shape [B*K]
@@ -1172,12 +1172,12 @@ def gumbel_muzero_policy_bfs2(
   # Reshape back to [B, K, ...]
   def unflatten(x):
     return x.reshape(batch_size, top_k_first, *x.shape[1:])
-  # child_outputs = jax.tree_map(unflatten, flat_outputs)
-  # child_embeddings = jax.tree_map(unflatten, flat_child_embed)
+  # child_outputs = jax.tree.map(unflatten, flat_outputs)
+  # child_embeddings = jax.tree.map(unflatten, flat_child_embed)
   # # child_outputs.reward, child_outputs.value, child_outputs.prior_logits, child_outputs.discount
 
-  layer1_outputs = jax.tree_map(unflatten, flat_outputs)
-  layer1_embeddings = jax.tree_map(unflatten, flat_child_embed)
+  layer1_outputs = jax.tree.map(unflatten, flat_outputs)
+  layer1_embeddings = jax.tree.map(unflatten, flat_child_embed)
 
 
   # --- 5. Now for each of those (B, top_k_first) children, pick the top_k_second subactions:
@@ -1215,8 +1215,8 @@ def gumbel_muzero_policy_bfs2(
     x_flat = x.reshape((batch_size*top_k_first,) + x.shape[2:])
     return jnp.repeat(x_flat, top_k_second, axis=0)
 
-  layer1_x_k2_embedding = jax.tree_map(replicate_child_leaf, layer1_embeddings)
-  # batched_child_embedding = jax.tree_map(replicate_child_leaf, first_layer_embeddings)
+  layer1_x_k2_embedding = jax.tree.map(replicate_child_leaf, layer1_embeddings)
+  # batched_child_embedding = jax.tree.map(replicate_child_leaf, first_layer_embeddings)
 
   # flatten out rng keys:
   flat_keys2 = rng_keys2.reshape(BxKxK2, rng_keys2.shape[-1])
@@ -1231,7 +1231,7 @@ def gumbel_muzero_policy_bfs2(
   def unflatten2(x):
     return x.reshape((batch_size, top_k_first, top_k_second) + x.shape[1:])
 
-  layer2_outputs = jax.tree_map(unflatten2, flat2_outputs)
+  layer2_outputs = jax.tree.map(unflatten2, flat2_outputs)
   # e.g. second_layer_out.value: shape [B, K, K2]
 
   # --- 7. Compute layer 2 leaf values
@@ -1402,11 +1402,11 @@ def gumbel_muzero_policy_bfs(
     flat_keys = rng_keys.reshape(-1, rng_keys.shape[-1])
 
     # Replicate the embedding for each action. If root_embedding is a pytree,
-    # we use jax.tree_map to replicate each array leaf.
+    # we use jax.tree.map to replicate each array leaf.
     def replicate_leaf(x):
         # x has shape [B, ...]; we want each batch element repeated N times along axis 0.
         return jnp.repeat(x, num_actions, axis=0)
-    flat_embedding = jax.tree_map(replicate_leaf, root_embedding)
+    flat_embedding = jax.tree.map(replicate_leaf, root_embedding)
 
     # Call recurrent_fn once over the flattened (B*N) dimension.
     flat_outputs, flat_new_embedding = recurrent_fn(params, flat_keys, flat_actions, flat_embedding)
@@ -1414,8 +1414,8 @@ def gumbel_muzero_policy_bfs(
     # Reshape outputs back to [B, N, ...]. We do this for every array leaf.
     def unflatten(x):
       return x.reshape((batch_size, num_actions) + x.shape[1:])
-    outputs = jax.tree_map(unflatten, flat_outputs)
-    new_embedding = jax.tree_map(unflatten, flat_new_embedding)
+    outputs = jax.tree.map(unflatten, flat_outputs)
+    new_embedding = jax.tree.map(unflatten, flat_new_embedding)
 
     return outputs, new_embedding
 
