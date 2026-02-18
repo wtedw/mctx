@@ -212,6 +212,7 @@ def qtransform_completed_by_mix_value(
     rescale_values: bool = True,
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
+    use_sqrt_scaling: bool = False,
 ) -> chex.Array:
   """Returns completed qvalues.
 
@@ -261,10 +262,15 @@ def qtransform_completed_by_mix_value(
   # Scaling the Q-values.
   if rescale_values:
     completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
-  # jax.debug.print("[OG qtransform2]@{}, completed_qvalues: {}", node_index, completed_qvalues)
-  maxvisit = jnp.max(visit_counts, axis=-1)
-  # jax.debug.print("[OG qtransform2]@{}, maxvisit: {}", node_index, maxvisit)
-  visit_scale = maxvisit_init + maxvisit
+
+
+  if use_sqrt_scaling:
+    max_visit = jnp.max(visit_counts, axis=-1)
+    # visit_scale = maxvisit_init + jnp.sqrt(max_visit)
+    visit_scale = jnp.sqrt(maxvisit_init + max_visit)
+  else:
+    maxvisit = jnp.max(visit_counts, axis=-1)
+    visit_scale = maxvisit_init + maxvisit
 
   # jax.debug.print("[OG qtransform2]@{}, visit_scale: {}", node_index, visit_scale)
   # jax.debug.print("[OG qtransform2]@{}, finqtransform: {}", node_index, visit_scale * value_scale * completed_qvalues)
