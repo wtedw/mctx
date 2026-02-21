@@ -213,6 +213,7 @@ def qtransform_completed_by_mix_value(
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
     use_sqrt_scaling: bool = False,
+    use_log_scaling: bool = False,
     use_normalized_advantages: bool = False,
 ) -> chex.Array:
   """Returns completed qvalues.
@@ -265,13 +266,17 @@ def qtransform_completed_by_mix_value(
     completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
 
 
-  if use_sqrt_scaling:
-    max_visit = jnp.max(visit_counts, axis=-1)
-    # visit_scale = maxvisit_init + jnp.sqrt(max_visit)
-    visit_scale = jnp.sqrt(maxvisit_init + max_visit)
+  max_visit = jnp.max(visit_counts, axis=-1)
+
+  if use_log_scaling:
+      # Use natural logarithm.
+      # Add 1.0 inside just in case maxvisit_init is 0 to prevent log(0)
+      visit_scale = jnp.log(maxvisit_init + max_visit + 1.0)
+  elif use_sqrt_scaling:
+      visit_scale = jnp.sqrt(maxvisit_init + max_visit)
   else:
-    maxvisit = jnp.max(visit_counts, axis=-1)
-    visit_scale = maxvisit_init + maxvisit
+      visit_scale = maxvisit_init + max_visit
+
 
   if use_normalized_advantages:
     # 1. Calculate raw advantages (Q(a) - V(s))
