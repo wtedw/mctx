@@ -273,7 +273,7 @@ def qtransform_completed_by_mix_value(
       # Add 1.0 inside just in case maxvisit_init is 0 to prevent log(0)
       visit_scale = jnp.log(maxvisit_init + max_visit + 1.0)
   elif use_sqrt_scaling:
-      visit_scale = jnp.sqrt(maxvisit_init + max_visit)
+      visit_scale = maxvisit_init + jnp.sqrt(max_visit)
   else:
       visit_scale = maxvisit_init + max_visit
 
