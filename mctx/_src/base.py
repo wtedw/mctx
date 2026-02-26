@@ -100,6 +100,7 @@ class PolicyOutput(Generic[T]):
   # search_tree: tree.Tree[T]
 
   # For BFS + related debugging
+  search_summary: Optional[Any] = None
   search_tree: Optional[Any] = None
   children_values: Optional[Any] = None
   root_gumbel: Optional[Any] = None

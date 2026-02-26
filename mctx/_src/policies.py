@@ -2289,6 +2289,7 @@ def gumbel_muzero_policy_opt(
     full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_final_score = full_final_score.at[batch_idx, k_children_indices].set(to_argmax)
     return base.PolicyOutput(
+        search_summary=summary,
         # always return non-k versions
         action=action,
         action_weights=action_weights,
@@ -2316,6 +2317,7 @@ def gumbel_muzero_policy_opt(
   # jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
   else:
     return base.PolicyOutput(
+        search_summary=summary,
         action=action,
         action_weights=action_weights,
         # k arrays

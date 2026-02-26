@@ -59,6 +59,7 @@ class Tree(Generic[T]):
   node_visits: chex.Array  # [B, N]
   raw_values: chex.Array  # [B, N]
   node_values: chex.Array  # [B, N]
+  node_depths: chex.Array  # [B, N]
   parents: chex.Array  # [B, N]
   action_from_parent: chex.Array  # [B, N]
   children_index: chex.Array  # [B, N, num_actions]
@@ -112,12 +113,60 @@ class Tree(Generic[T]):
     total_counts = jnp.sum(visit_counts, axis=-1, keepdims=True)
     visit_probs = visit_counts / jnp.maximum(total_counts, 1)
     visit_probs = jnp.where(total_counts > 0, visit_probs, 1 / self.num_actions)
+
+    # 1. Calculate Max Depth of the tree
+    # Mask out unvisited nodes (though depth is naturally 0 for unvisited root
+    # nodes)
+    visited_mask = self.node_visits > 0
+    max_depth = jnp.max(self.node_depths * visited_mask, axis=-1)
+
+    # 2. Calculate Regret of the search process
+    # Simple Regret: The difference between the highest possible Q-value
+    # and the expected Q-value under the new search policy (visit_probs).
+    max_qvalues = jnp.max(qvalues, axis=-1)
+    expected_qvalue = jnp.sum(visit_probs * qvalues, axis=-1)
+    regret = max_qvalues - expected_qvalue
+
+    # ---------------------------------------------------------
+    # 1. Cumulative Regret Calculation
+    # ---------------------------------------------------------
+    max_qvalues_expanded = jnp.max(qvalues, axis=-1, keepdims=True)
+    per_action_regret = max_qvalues_expanded - qvalues
+    # Multiply the regret of each action by how many times it was simulated
+    cumulative_regret = jnp.sum(visit_counts * per_action_regret, axis=-1)
+
+    # ---------------------------------------------------------
+    # 2. Search Policy Divergence (KL Divergence)
+    # ---------------------------------------------------------
+    # Fetch the neural network's raw prior logits for the root node
+    prior_logits = self.children_prior_logits[:, self.ROOT_INDEX, :]
+    prior_probs = jax.nn.softmax(prior_logits, axis=-1)
+
+    # Add a tiny epsilon to avoid log(0)
+    eps = 1e-8
+    kl_divergence = jnp.sum(
+        visit_probs * (jnp.log(visit_probs + eps) - jnp.log(prior_probs + eps)),
+        axis=-1
+    )
+
+    # ---------------------------------------------------------
+    # 3. Value Improvement
+    # ---------------------------------------------------------
+    # Compare the final search value to the raw network value at the root
+    raw_root_value = self.raw_values[:, self.ROOT_INDEX]
+    value_improvement = value - raw_root_value
+
     # Return relevant stats.
     return SearchSummary(  # pytype: disable=wrong-arg-types  # numpy-scalars
         visit_counts=visit_counts,
         visit_probs=visit_probs,
         value=value,
-        qvalues=qvalues)
+        qvalues=qvalues,
+        max_depth=max_depth,
+        simple_regret=regret,
+        cumulative_regret=cumulative_regret,
+        kl_divergence=kl_divergence,
+        value_improvement=value_improvement)
 
 
 def infer_batch_size(tree: Tree) -> int:
@@ -137,6 +186,11 @@ class SearchSummary:
   visit_probs: chex.Array
   value: chex.Array
   qvalues: chex.Array
+  max_depth: chex.Array
+  simple_regret: chex.Array
+  cumulative_regret: chex.Array
+  kl_divergence: chex.Array
+  value_improvement: chex.Array
 
 
 def _unbatched_qvalues(tree: Tree, index: int) -> int:

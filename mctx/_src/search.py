@@ -228,6 +228,9 @@ def expand(
   tree = update_tree_node(
       tree, next_node_index, step.prior_logits, step.value, embedding)
 
+  # Calculate the depth of the newly expanded node
+  new_depths = tree.node_depths[batch_range, parent_index] + 1
+
   # Return updated tree topology.
   return tree.replace(
       children_index=batch_update(
@@ -238,7 +241,11 @@ def expand(
           tree.children_discounts, step.discount, parent_index, action),
       parents=batch_update(tree.parents, parent_index, next_node_index),
       action_from_parent=batch_update(
-          tree.action_from_parent, action, next_node_index))
+          tree.action_from_parent, action, next_node_index),
+      # Save the computed depth
+      node_depths=batch_update(
+          tree.node_depths, new_depths, next_node_index)
+  )
 
 
 @jax.vmap
@@ -361,6 +368,7 @@ def instantiate_tree_from_root(
       node_visits=jnp.zeros(batch_node, dtype=jnp.int32),
       raw_values=jnp.zeros(batch_node, dtype=data_dtype),
       node_values=jnp.zeros(batch_node, dtype=data_dtype),
+      node_depths=jnp.zeros(batch_node, dtype=jnp.int32),
       parents=jnp.full(batch_node, Tree.NO_PARENT, dtype=jnp.int32),
       action_from_parent=jnp.full(
           batch_node, Tree.NO_PARENT, dtype=jnp.int32),
