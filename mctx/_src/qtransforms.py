@@ -213,6 +213,7 @@ def qtransform_completed_by_mix_value(
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
     use_sqrt_scaling: bool = False,
+    use_sqrt_scaling2: bool = False,
     use_log_scaling: bool = False,
     use_normalized_advantages: bool = False,
 ) -> chex.Array:
@@ -274,6 +275,8 @@ def qtransform_completed_by_mix_value(
       visit_scale = maxvisit_init + jnp.log(max_visit + 1.0)
   elif use_sqrt_scaling:
       visit_scale = maxvisit_init + jnp.sqrt(max_visit)
+  elif use_sqrt_scaling2:
+      visit_scale = jnp.sqrt(maxvisit_init + max_visit)
   else:
       visit_scale = maxvisit_init + max_visit
 
