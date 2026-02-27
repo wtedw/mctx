@@ -105,31 +105,59 @@ class Tree(Generic[T]):
     # Root-level stats
     chex.assert_rank(self.node_values, 2)
     value = self.node_values[:, Tree.ROOT_INDEX]
-    batch_size, = value.shape
+    prior_logits = self.children_prior_logits[:, self.ROOT_INDEX, :]
+    batch_size, num_actions = prior_logits.shape
     root_indices = jnp.full((batch_size,), Tree.ROOT_INDEX)
-    qvalues = self.qvalues(root_indices)  # Shape: [B, A]
+    qvalues = self.qvalues(root_indices)
     visit_counts = self.children_visits[:, Tree.ROOT_INDEX].astype(value.dtype)
     total_counts = jnp.sum(visit_counts, axis=-1, keepdims=True)
     visit_probs = visit_counts / jnp.maximum(total_counts, 1)
     visit_probs = jnp.where(
         total_counts > 0, visit_probs, 1 / self.num_actions)
 
-    # Root-level Allocation Efficiency (Min-Max Normalized)
+    # Simple Regret (Root)
     max_q_root = jnp.max(qvalues, axis=-1)
-    min_q_root = jnp.min(qvalues, axis=-1)
     expected_q_root = jnp.sum(visit_probs * qvalues, axis=-1)
+    simple_regret_root = max_q_root - expected_q_root
+
+    # Allocation Efficiency (Root, Min-Max Normalized)
+    min_q_root = jnp.min(qvalues, axis=-1)
     q_range_root = jnp.maximum(max_q_root - min_q_root, 1e-8)
     allocation_efficiency_root = (expected_q_root - min_q_root) / q_range_root
 
-    # Tree-level stats
-    visited_mask = self.node_visits > 0  # Shape: [B, N]
-    num_visited_nodes = jnp.sum(visited_mask, axis=-1)
+    # KL Divergence (Root)
+    prior_probs = jax.nn.softmax(prior_logits, axis=-1)
+    eps = 1e-8
+    kl_divergence = jnp.sum(
+        visit_probs * (jnp.log(visit_probs + eps) - jnp.log(prior_probs + eps)),
+        axis=-1)
 
-    # Average Children Per Node
+    # Value Improvement (Root)
+    raw_root_value = self.raw_values[:, self.ROOT_INDEX]
+    value_improvement = value - raw_root_value
+
+    # Top-5 Precision (Root)
+    num_legal_actions = jnp.sum(jnp.isfinite(prior_logits), axis=-1)
+    k_static = 5
+    k_dynamic = jnp.minimum(k_static, num_legal_actions)
+    top_k_q_indices = jax.lax.top_k(qvalues, k=k_static)[1]
+    top_k_visit_indices = jax.lax.top_k(visit_counts, k=k_static)[1]
+    set_q = jnp.sum(jax.nn.one_hot(top_k_q_indices, num_actions), axis=1)
+    set_visits = jnp.sum(jax.nn.one_hot(top_k_visit_indices, num_actions), axis=1)
+    intersection_size = jnp.sum(set_q * set_visits, axis=-1)
+    top_5_precision_root = intersection_size / jnp.maximum(k_dynamic, 1)
+
+    # Tree-level stats
+    visited_mask = self.node_visits > 0
     num_children_per_node = jnp.sum(
         self.children_index != Tree.UNVISITED, axis=-1)
-    total_children = jnp.sum(num_children_per_node * visited_mask, axis=-1)
-    avg_children_per_node = total_children / jnp.maximum(num_visited_nodes, 1)
+
+    # Average Children Per *Internal* Node
+    internal_node_mask = (visited_mask) & (num_children_per_node > 0)
+    num_internal_nodes = jnp.sum(internal_node_mask, axis=-1)
+    total_children = jnp.sum(
+        num_children_per_node * internal_node_mask, axis=-1)
+    avg_children_per_node = total_children / jnp.maximum(num_internal_nodes, 1)
 
     # Tree-wide Allocation Efficiency (Min-Max Normalized)
     all_qvalues = (
@@ -157,7 +185,11 @@ class Tree(Generic[T]):
         value=value,
         qvalues=qvalues,
         max_depth=max_depth,
+        simple_regret_root=simple_regret_root,
         allocation_efficiency_root=allocation_efficiency_root,
+        kl_divergence=kl_divergence,
+        value_improvement=value_improvement,
+        top_5_precision_root=top_5_precision_root,
         avg_children_per_node=avg_children_per_node,
         avg_allocation_efficiency_tree=avg_allocation_efficiency_tree)
 
@@ -180,7 +212,13 @@ class SearchSummary:
   value: chex.Array
   qvalues: chex.Array
   max_depth: chex.Array
+  # Root-level metrics
+  simple_regret_root: chex.Array
   allocation_efficiency_root: chex.Array
+  kl_divergence: chex.Array
+  value_improvement: chex.Array
+  top_5_precision_root: chex.Array
+  # Tree-level metrics
   avg_children_per_node: chex.Array
   avg_allocation_efficiency_tree: chex.Array
 
