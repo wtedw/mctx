@@ -149,6 +149,7 @@ class Tree(Generic[T]):
 
     # Tree-level stats
     visited_mask = self.node_visits > 0
+    num_visited_nodes = jnp.sum(visited_mask, axis=-1)
     num_children_per_node = jnp.sum(
         self.children_index != Tree.UNVISITED, axis=-1)
 
