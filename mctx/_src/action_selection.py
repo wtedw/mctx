@@ -176,6 +176,7 @@ def gumbel_muzero_interior_action_selection(
     node_index: chex.Numeric,
     depth: chex.Numeric,
     *,
+    normalize_advantages: bool = False,
     qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
 ) -> chex.Array:
   """Selects the action with a deterministic action selection.
@@ -204,10 +205,34 @@ def gumbel_muzero_interior_action_selection(
   # because the missing qvalues are replaced by v_{prior_logits}(node).
 
 
-  # jax.debug.print("[OG interior_action]@node{}, prior_logits: {}", node_index, prior_logits)
-  to_argmax = _prepare_argmax_input(
-      probs=jax.nn.softmax(prior_logits + completed_qvalues),
-      visit_counts=visit_counts)
+  if normalize_advantages:
+    # A. Get the policy probabilities for this node
+    pi = jax.nn.softmax(prior_logits)
+
+    # B. Compute the expected value (v_pi) to act as your mean (mu)
+    v_pi = jnp.sum(pi * completed_qvalues, axis=-1, keepdims=True)
+
+    # C. Center the Q-values (X - mu)
+    advantages = completed_qvalues - v_pi
+
+    # D. Calculate local standard deviation
+    adv_std = jnp.std(advantages, axis=-1, keepdims=True)
+
+    # E. Normalize and clip
+    # Clipping to a small range like [-2.0, 2.0] or [-1.0, 1.0] acts as a
+    # mathematical safeguard against one-hot collapse inside the softmax.
+    c = 5.0
+    normalized_advantages = (advantages / (adv_std + 1e-8))
+    normalized_advantages = jnp.clip(normalized_advantages, -c, c)
+
+    # The `prior_logits + normalized_advantages`
+    to_argmax = _prepare_argmax_input(
+        probs=jax.nn.softmax(prior_logits + normalized_advantages),
+        visit_counts=visit_counts)
+  else:
+    to_argmax = _prepare_argmax_input(
+        probs=jax.nn.softmax(prior_logits + completed_qvalues),
+        visit_counts=visit_counts)
 
 
   # Add tiny bit of randomness for tie break

@@ -215,7 +215,6 @@ def qtransform_completed_by_mix_value(
     use_sqrt_scaling: bool = False,
     use_sqrt_scaling2: bool = False,
     use_log_scaling: bool = False,
-    use_normalized_advantages: bool = False,
 ) -> chex.Array:
   """Returns completed qvalues.
 
@@ -280,21 +279,7 @@ def qtransform_completed_by_mix_value(
   else:
       visit_scale = maxvisit_init + max_visit
 
-
-  if use_normalized_advantages:
-    # 1. Calculate raw advantages (Q(a) - V(s))
-    advantages = completed_qvalues - value
-
-    # 2. Normalize by standard deviation
-    adv_std = jnp.std(advantages, axis=-1, keepdims=True)
-    normalized_advantages = advantages / (adv_std + epsilon)
-
-    # 3. Clip
-    clipped_advantages = jnp.clip(normalized_advantages, -5.0, 5.0)
-
-    return visit_scale * value_scale * clipped_advantages
-  else:
-    return visit_scale * value_scale * completed_qvalues
+  return visit_scale * value_scale * completed_qvalues
 
 
 def _rescale_qvalues(qvalues, epsilon):
