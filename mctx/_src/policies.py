@@ -2108,6 +2108,7 @@ def gumbel_muzero_policy_opt(
     max_depth: Optional[int] = None,
     loop_fn: base.LoopFn = jax.lax.fori_loop,
     *,
+    interior_fn_normalize_advantages: bool = False,
     qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
@@ -2196,6 +2197,7 @@ def gumbel_muzero_policy_opt(
       ),
       interior_action_selection_fn=functools.partial(
           action_selection.gumbel_muzero_interior_action_selection,
+          normalize_advantages=interior_fn_normalize_advantages,
           qtransform=qtransform,
       ),
       num_k_actions=num_k_actions,
