@@ -2113,6 +2113,7 @@ def gumbel_muzero_policy_opt(
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
     rehydrate_fields: bool = False,
+    return_summary: bool = False,
     use_muesli: bool = False,
     muesli_beta: float = 2.0,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
@@ -2205,7 +2206,7 @@ def gumbel_muzero_policy_opt(
       max_depth=max_depth,
       invalid_actions=k_invalid_actions,
       extra_data=extra_data)
-  summary = search_tree.summary()
+  summary = search_tree.summary(include_metrics=return_summary)
 
   # Acting with the best action from the most visited actions.
   # The "best" action has the highest `gumbel + logits + q`.
@@ -2291,7 +2292,7 @@ def gumbel_muzero_policy_opt(
     full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
     full_final_score = full_final_score.at[batch_idx, k_children_indices].set(to_argmax)
     return base.PolicyOutput(
-        search_summary=summary,
+        search_summary=summary if return_summary else None,
         # always return non-k versions
         action=action,
         action_weights=action_weights,
@@ -2319,7 +2320,7 @@ def gumbel_muzero_policy_opt(
   # jax.debug.print("[gumbel reg] action_weights: {}", action_weights)
   else:
     return base.PolicyOutput(
-        search_summary=summary,
+        search_summary=summary if return_summary else None,
         action=action,
         action_weights=action_weights,
         # k arrays

@@ -100,7 +100,7 @@ class Tree(Generic[T]):
       return _unbatched_qvalues(self, indices)
     # pytype: enable=wrong-arg-types
 
-  def summary(self) -> SearchSummary:
+  def summary(self, include_metrics: bool = True) -> SearchSummary:
     """Extract summary statistics for the root node."""
     # Root-level stats
     chex.assert_rank(self.node_values, 2)
@@ -114,6 +114,13 @@ class Tree(Generic[T]):
     visit_probs = visit_counts / jnp.maximum(total_counts, 1)
     visit_probs = jnp.where(
         total_counts > 0, visit_probs, 1 / self.num_actions)
+
+    if not include_metrics:
+      return SearchSummary(
+          visit_counts=visit_counts,
+          visit_probs=visit_probs,
+          value=value,
+          qvalues=qvalues)
 
     # Simple Regret (Root)
     max_q_root = jnp.max(qvalues, axis=-1)
