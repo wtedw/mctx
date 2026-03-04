@@ -219,16 +219,16 @@ class SearchSummary:
   visit_probs: chex.Array
   value: chex.Array
   qvalues: chex.Array
-  max_depth: chex.Array
+  max_depth: Optional[chex.Array] = None
   # Root-level metrics
-  simple_regret_root: chex.Array
-  allocation_efficiency_root: chex.Array
-  kl_divergence: chex.Array
-  value_improvement: chex.Array
-  top_5_precision_root: chex.Array
+  simple_regret_root: Optional[chex.Array] = None
+  allocation_efficiency_root: Optional[chex.Array] = None
+  kl_divergence: Optional[chex.Array] = None
+  value_improvement: Optional[chex.Array] = None
+  top_5_precision_root: Optional[chex.Array] = None
   # Tree-level metrics
-  avg_children_per_node: chex.Array
-  avg_allocation_efficiency_tree: chex.Array
+  avg_children_per_node: Optional[chex.Array] = None
+  avg_allocation_efficiency_tree: Optional[chex.Array] = None
 
 
 def _unbatched_qvalues(tree: Tree, index: int) -> int:
