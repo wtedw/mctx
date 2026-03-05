@@ -2114,6 +2114,7 @@ def gumbel_muzero_policy_opt(
     gumbel_scale: chex.Numeric = 1.,
     rehydrate_fields: bool = False,
     return_summary: bool = False,
+    return_search_tree: bool = False,
     use_muesli: bool = False,
     muesli_beta: float = 2.0,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
@@ -2298,7 +2299,7 @@ def gumbel_muzero_policy_opt(
         action_weights=action_weights,
         visit_probs=full_visit_probs,
         visit_counts=full_visit_counts,
-        search_tree=search_tree,
+        search_tree=search_tree if return_search_tree else None,
         search_logits=full_search_logits,
         children_values=full_children_values, # [bug] k_children_indices not right
         root_gumbel=gumbel,
@@ -2324,7 +2325,7 @@ def gumbel_muzero_policy_opt(
         action=action,
         action_weights=action_weights,
         # k arrays
-        search_tree=search_tree,
+        search_tree=search_tree if return_search_tree else None,
         search_logits=search_logits,
         children_values=k_children_values,
         root_gumbel=k_gumbel,
