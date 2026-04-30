@@ -2169,8 +2169,12 @@ def gumbel_muzero_policy_opt(
   gumbel = gumbel_scale * jax.random.gumbel(
       gumbel_rng, shape=root.prior_logits.shape, dtype=root.prior_logits.dtype)
 
-  k_logits, k_indices = jax.lax.top_k(root.prior_logits + gumbel, k=num_k_actions)
-  k_gumbel = jnp.take_along_axis(gumbel, k_indices, axis=-1)
+  # Use prior + gumbel ONLY for picking K survivors (Gumbel-Top-K sampling)
+  _, k_indices = jax.lax.top_k(root.prior_logits + gumbel, k=num_k_actions)
+
+  # Gather the three things we need over those K actions:
+  k_prior_logits = jnp.take_along_axis(root.prior_logits, k_indices, axis=-1)  # CLEAN prior
+  k_gumbel       = jnp.take_along_axis(gumbel, k_indices, axis=-1)  # gumbel for selection
 
   if invalid_actions is None:
       k_invalid_actions = None
@@ -2178,8 +2182,9 @@ def gumbel_muzero_policy_opt(
       k_invalid_actions = jnp.take_along_axis(invalid_actions, k_indices, axis=-1)
 
   # Masking invalid actions.
+  k_masked_prior_logits = _mask_invalid_actions(k_prior_logits, k_invalid_actions)
   root = root.replace(
-      prior_logits=_mask_invalid_actions(k_logits, k_invalid_actions),
+      prior_logits=k_masked_prior_logits,
       k_indices=k_indices
   )
 
@@ -2220,7 +2225,7 @@ def gumbel_muzero_policy_opt(
       search_tree, search_tree.ROOT_INDEX)
   # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
-      considered_visit, k_gumbel, k_logits, completed_qvalues,
+      considered_visit, k_gumbel, k_masked_prior_logits, completed_qvalues,
       summary.visit_counts)
 
   ### [BNK]
@@ -2237,8 +2242,8 @@ def gumbel_muzero_policy_opt(
   if use_muesli:
       # [Muesli Target Logic]
       # 1. Calculate v_pi (Expected value of policy on these K actions)
-      # Note: k_logits are already masked, so invalid actions contribute 0 prob.
-      k_probs = jax.nn.softmax(k_logits)
+      # Note: k_masked_prior_logits are already masked, so invalid actions contribute 0 prob.
+      k_probs = jax.nn.softmax(k_masked_prior_logits)
       v_pi = jnp.sum(k_probs * completed_qvalues, axis=-1, keepdims=True)
 
       # 2. Calculate Advantages (Scaling factors in completed_qvalues cancel out later)
@@ -2254,16 +2259,15 @@ def gumbel_muzero_policy_opt(
 
       # We add the stable signal to the logits
       final_advantages = (muesli_beta * norm_advantages)
-      completed_search_logits = k_logits + final_advantages
 
       # Mask again to ensure safety
       completed_search_logits = _mask_invalid_actions(
-          completed_search_logits, k_invalid_actions)
+          k_masked_prior_logits + final_advantages, k_invalid_actions)
   else:
     # Producing action_weights usable to train the policy network.
       final_advantages = completed_qvalues
       completed_search_logits = _mask_invalid_actions(
-          k_logits + final_advantages, k_invalid_actions) # [B, K]
+          k_masked_prior_logits + final_advantages, k_invalid_actions) # [B, K]
 
   ### [BNK]
   k_action_weights = jax.nn.softmax(completed_search_logits)  # [B, K]
@@ -2274,7 +2278,7 @@ def gumbel_muzero_policy_opt(
   action_weights = full_weights.at[batch_idx, k_indices].set(k_action_weights)  # [B, A]
 
   # [bfs] for debugging
-  search_logits = k_logits + final_advantages # for debugging
+  search_logits = k_masked_prior_logits + final_advantages # for debugging
   k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
 
@@ -2291,7 +2295,7 @@ def gumbel_muzero_policy_opt(
     full_children_values = jnp.zeros((batch_size, num_actions), dtype=k_children_values.dtype)
     full_children_values = full_children_values.at[batch_idx, k_indices].set(k_children_values)
     full_final_score = jnp.zeros((batch_size, num_actions), dtype=k_action_weights.dtype)
-    full_final_score = full_final_score.at[batch_idx, k_children_indices].set(to_argmax)
+    full_final_score = full_final_score.at[batch_idx, k_indices].set(to_argmax)
     return base.PolicyOutput(
         search_summary=summary if return_summary else None,
         # always return non-k versions
@@ -2301,7 +2305,7 @@ def gumbel_muzero_policy_opt(
         visit_counts=full_visit_counts,
         search_tree=search_tree if return_search_tree else None,
         search_logits=full_search_logits,
-        children_values=full_children_values, # [bug] k_children_indices not right
+        children_values=full_children_values,
         root_gumbel=gumbel,
         root_prior_logits=bna_prior_logits,
         final_qvalues=full_completed_qvalues,
@@ -2314,7 +2318,7 @@ def gumbel_muzero_policy_opt(
         bnk_visit_probs=summary.visit_probs,
         bnk_visit_counts=summary.visit_counts,
         bnk_k_indices=k_indices,
-        k_root_prior_logits=k_logits,
+        k_root_prior_logits=k_masked_prior_logits,
         k_search_logits=search_logits,
     )
   # jax.debug.print("[gumbel reg] completed_search_logits: {}", completed_search_logits)
@@ -2329,7 +2333,7 @@ def gumbel_muzero_policy_opt(
         search_logits=search_logits,
         children_values=k_children_values,
         root_gumbel=k_gumbel,
-        root_prior_logits=k_logits,
+        root_prior_logits=k_masked_prior_logits,
         final_qvalues=completed_qvalues,
         final_score=to_argmax,
         advantages=final_advantages,
@@ -2339,7 +2343,7 @@ def gumbel_muzero_policy_opt(
         bnk_visit_probs = summary.visit_probs,
         bnk_visit_counts = summary.visit_counts,
         bnk_k_indices = k_indices,
-        k_root_prior_logits=k_logits,
+        k_root_prior_logits=k_masked_prior_logits,
         k_search_logits=search_logits,
     )
 
