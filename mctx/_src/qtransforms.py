@@ -358,7 +358,7 @@ def qtransform_completed_by_mix_value2(
       visit_scale = maxvisit_init + max_visit
 
   cqvalues = visit_scale * value_scale * completed_qvalues
-  svalue = visit_scale * value
+  svalue = visit_scale * value_scale * value
 
   return (cqvalues, svalue, value)
 
