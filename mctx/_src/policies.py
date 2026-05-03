@@ -2249,13 +2249,12 @@ def gumbel_muzero_policy_opt(
       # 2. Calculate Advantages (Scaling factors in completed_qvalues cancel out later)
       advantages = completed_qvalues - v_pi
 
-      # 3. Normalize (The cancellation happens here)
-      adv_mean = jnp.mean(advantages, axis=-1, keepdims=True)
+      # 3. # Std-normalize
       adv_std = jnp.std(advantages, axis=-1, keepdims=True)
-      norm_advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+      norm_advantages = advantages / (adv_std + 1e-8)
 
       # 4. Clip and construct target
-      norm_advantages = jnp.clip(norm_advantages, -5.0, 5.0)
+      norm_advantages = jnp.clip(norm_advantages, -2.0, 2.0)
 
       # We add the stable signal to the logits
       final_advantages = (muesli_beta * norm_advantages)
