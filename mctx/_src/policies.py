@@ -2222,7 +2222,7 @@ def gumbel_muzero_policy_opt(
   considered_visit = jnp.max(summary.visit_counts, axis=-1, keepdims=True)
   # jax.debug.print("[gumbel reg] considered_visited: {}", considered_visit)
   # The completed_qvalues include imputed values for unvisited actions.
-  completed_qvalues, sigma_v_pi, v_pi = jax.vmap(qtransforms.qtransform_completed_by_mix_value2, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
+  completed_qvalues, sigma_v_pi, v_pi = jax.vmap(final_qtransform, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
       search_tree, search_tree.ROOT_INDEX)
   # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
