@@ -119,6 +119,7 @@ class PolicyOutput(Generic[T]):
   visit_probs: Optional[Any] = None
   raw_value: Optional[Any] = None
   mixed_value: Optional[Any] = None
+  sigma_v_pi: Optional[Any] = None
   maxvisit: Optional[Any] = None
 
   # For BNK

@@ -281,6 +281,87 @@ def qtransform_completed_by_mix_value(
 
   return visit_scale * value_scale * completed_qvalues
 
+def qtransform_completed_by_mix_value2(
+    tree: tree_lib.Tree,
+    node_index: chex.Numeric,
+    *,
+    value_scale: chex.Numeric = 0.1,
+    maxvisit_init: chex.Numeric = 50.0,
+    rescale_values: bool = True,
+    use_mixed_value: bool = True,
+    epsilon: chex.Numeric = 1e-8,
+    use_sqrt_scaling: bool = False,
+    use_sqrt_scaling2: bool = False,
+    use_log_scaling: bool = False,
+) -> chex.Array:
+  """Returns completed qvalues.
+
+  The missing Q-values of the unvisited actions are replaced by the
+  mixed value, defined in Appendix D of
+  "Policy improvement by planning with Gumbel":
+  https://openreview.net/forum?id=bERaNdoegnO
+
+  The Q-values are transformed by a linear transformation:
+    `(maxvisit_init + max(visit_counts)) * value_scale * qvalues`.
+
+  Args:
+    tree: _unbatched_ MCTS tree state.
+    node_index: scalar index of the parent node.
+    value_scale: scale for the Q-values.
+    maxvisit_init: offset to the `max(visit_counts)` in the scaling factor.
+    rescale_values: if True, scale the qvalues by `1 / (max_q - min_q)`.
+    use_mixed_value: if True, complete the Q-values with mixed value,
+      otherwise complete the Q-values with the raw value.
+    epsilon: the minimum denominator when using `rescale_values`.
+
+  Returns:
+    Completed Q-values. Shape `[num_actions]`.
+  """
+  chex.assert_shape(node_index, ())
+  qvalues = tree.qvalues(node_index)
+  visit_counts = tree.children_visits[node_index]
+
+  # Computing the mixed value and producing completed_qvalues.
+  raw_value = tree.raw_values[node_index]
+  prior_probs = jax.nn.softmax(
+      tree.children_prior_logits[node_index])
+  if use_mixed_value:
+    value = _compute_mixed_value(
+        raw_value,
+        qvalues=qvalues,
+        visit_counts=visit_counts,
+        prior_probs=prior_probs)
+  else:
+    value = raw_value
+  # jax.debug.print("[OG qtransform]@{}, qvalues: {}", node_index, qvalues)
+  # jax.debug.print("[OG qtransform]@{}, visit_counts: {}", node_index, visit_counts)
+  # jax.debug.print("[OG qtransform]@{}, value: {}", node_index, value)
+  completed_qvalues = _complete_qvalues(
+      qvalues, visit_counts=visit_counts, value=value)
+
+  # Scaling the Q-values.
+  if rescale_values:
+    completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
+
+
+  max_visit = jnp.max(visit_counts, axis=-1)
+
+  if use_log_scaling:
+      # Use natural logarithm.
+      # Add 1.0 inside just in case maxvisit_init is 0 to prevent log(0)
+      visit_scale = maxvisit_init + jnp.log(max_visit + 1.0)
+  elif use_sqrt_scaling:
+      visit_scale = maxvisit_init + jnp.sqrt(max_visit)
+  elif use_sqrt_scaling2:
+      visit_scale = jnp.sqrt(maxvisit_init + max_visit)
+  else:
+      visit_scale = maxvisit_init + max_visit
+
+  cqvalues = visit_scale * value_scale * completed_qvalues
+  svalue = visit_scale * value
+
+  return (cqvalues, svalue, value)
+
 
 def _rescale_qvalues(qvalues, epsilon):
   """Rescales the given completed Q-values to be from the [0, 1] interval."""
