@@ -421,6 +421,7 @@ def gumbel_muzero_policy_sh2(
     epsilon: chex.Numeric = 1e-8,
     use_muesli: bool = False,
     muesli_beta: float = 2.0,
+    use_bnk: bool = False,
 ) -> base.PolicyOutput[None]:
   """
   Sequential-Halving BFS (2 rungs).
@@ -834,6 +835,18 @@ def gumbel_muzero_policy_sh2(
   search_logits = _mask_invalid_actions(search_logits, invalid_actions)
   action_weights = jax.nn.softmax(search_logits)
 
+  # BNK compressed fields: gather over the top_k_first expanded actions
+  if use_bnk:
+    bnk_k_indices = first_idx                                               # [B, K1]
+    k_root_prior_logits = _fast_gather2d(root.prior_logits, first_idx)     # [B, K1]
+    k_search_logits = _fast_gather2d(search_logits, first_idx)             # [B, K1]
+    bnk_action_weights = jax.nn.softmax(k_search_logits)                   # [B, K1]
+  else:
+    bnk_k_indices = None
+    k_root_prior_logits = None
+    k_search_logits = None
+    bnk_action_weights = None
+
   # return base.PolicyOutput(
   #     action         = best_a,
   #     action_weights = action_weights,
@@ -875,6 +888,12 @@ def gumbel_muzero_policy_sh2(
       maxvisit         = maxvisit,                      # [B]
       rescaled_qvalues = rescaled_qvalues1,                   # [B, A]  (optional)
       rescaled_qvalues2 = rescaled_qvalues2,                   # [B, A]  (optional)
+
+      # BNK compressed fields (populated when use_bnk=True)
+      bnk_k_indices        = bnk_k_indices,             # [B, K1] or None
+      k_root_prior_logits  = k_root_prior_logits,       # [B, K1] or None
+      k_search_logits      = k_search_logits,           # [B, K1] or None
+      bnk_action_weights   = bnk_action_weights,        # [B, K1] or None
   )
 
 def gumbel_muzero_policy_bfs3(
