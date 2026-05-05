@@ -2340,7 +2340,7 @@ def gumbel_muzero_policy_opt(
         action_weights=action_weights,
         # k arrays
         search_tree=search_tree if return_search_tree else None,
-        search_logits=search_logits,
+        search_logits=k_search_logits,
         children_values=k_children_values,
         root_gumbel=k_gumbel,
         root_prior_logits=k_masked_prior_logits,
