@@ -287,7 +287,6 @@ def qtransform_completed_by_mix_value2(
     *,
     value_scale: chex.Numeric = 0.1,
     maxvisit_init: chex.Numeric = 50.0,
-    rescale_values: bool = True,
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
     use_sqrt_scaling: bool = False,
@@ -309,7 +308,6 @@ def qtransform_completed_by_mix_value2(
     node_index: scalar index of the parent node.
     value_scale: scale for the Q-values.
     maxvisit_init: offset to the `max(visit_counts)` in the scaling factor.
-    rescale_values: if True, scale the qvalues by `1 / (max_q - min_q)`.
     use_mixed_value: if True, complete the Q-values with mixed value,
       otherwise complete the Q-values with the raw value.
     epsilon: the minimum denominator when using `rescale_values`.
@@ -333,15 +331,8 @@ def qtransform_completed_by_mix_value2(
         prior_probs=prior_probs)
   else:
     value = raw_value
-  # jax.debug.print("[OG qtransform]@{}, qvalues: {}", node_index, qvalues)
-  # jax.debug.print("[OG qtransform]@{}, visit_counts: {}", node_index, visit_counts)
-  # jax.debug.print("[OG qtransform]@{}, value: {}", node_index, value)
   completed_qvalues = _complete_qvalues(
       qvalues, visit_counts=visit_counts, value=value)
-
-  # Scaling the Q-values.
-  if rescale_values:
-    completed_qvalues = _rescale_qvalues(completed_qvalues, epsilon)
 
 
   max_visit = jnp.max(visit_counts, axis=-1)
@@ -357,10 +348,11 @@ def qtransform_completed_by_mix_value2(
   else:
       visit_scale = maxvisit_init + max_visit
 
-  cqvalues = visit_scale * value_scale * completed_qvalues
-  svalue = visit_scale * value_scale * value
+  final_scale = visit_scale * value_scale
+  cqvalues = final_scale * completed_qvalues
+  svalue = final_scale * value
 
-  return (cqvalues, svalue, value)
+  return (cqvalues, svalue, value, final_scale)
 
 
 def _rescale_qvalues(qvalues, epsilon):

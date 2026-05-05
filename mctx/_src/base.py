@@ -132,6 +132,7 @@ class PolicyOutput(Generic[T]):
   k_search_logits: Optional[Any] = None
 
   advantages: Optional[Any] = None
+  final_advantages: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)

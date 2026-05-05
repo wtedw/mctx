@@ -2243,7 +2243,7 @@ def gumbel_muzero_policy_opt(
   considered_visit = jnp.max(summary.visit_counts, axis=-1, keepdims=True)
   # jax.debug.print("[gumbel reg] considered_visited: {}", considered_visit)
   # The completed_qvalues include imputed values for unvisited actions.
-  completed_qvalues, sigma_v_pi, v_pi = jax.vmap(final_qtransform, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
+  completed_qvalues, sigma_v_pi, v_pi, final_scale = jax.vmap(final_qtransform, in_axes=[0, None])(  # pytype: disable=wrong-arg-types  # numpy-scalars  # pylint: disable=line-too-long
       search_tree, search_tree.ROOT_INDEX)
   # jax.debug.print("[gumbel reg] completed_qvalues: {}", completed_qvalues)
   to_argmax = seq_halving.score_considered(
@@ -2317,7 +2317,8 @@ def gumbel_muzero_policy_opt(
         root_prior_logits=bna_prior_logits,
         final_qvalues=full_completed_qvalues,
         final_score=full_final_score,
-        advantages=full_advantages,
+        final_advantages=full_advantages,
+        advantages=(full_advantages/final_scale),
         raw_value=root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
@@ -2345,7 +2346,8 @@ def gumbel_muzero_policy_opt(
         root_prior_logits=k_masked_prior_logits,
         final_qvalues=completed_qvalues,
         final_score=to_argmax,
-        advantages=final_advantages,
+        final_advantages=final_advantages,
+        advantages=(final_advantages/final_scale),
         raw_value= root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
