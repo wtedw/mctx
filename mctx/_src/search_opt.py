@@ -323,27 +323,29 @@ def expand(
   chex.assert_shape(step.reward, [batch_size])
   chex.assert_shape(step.discount, [batch_size])
   chex.assert_shape(step.value, [batch_size])
-  tree = update_tree_node(
-      tree, next_node_index, k_indices, k_logits, step.value, embedding)
+  with jax.named_scope("expand_update_node"):
+    tree = update_tree_node(
+        tree, next_node_index, k_indices, k_logits, step.value, embedding)
 
   # Calculate the depth of the newly expanded node
   new_depths = tree.node_depths[batch_range, parent_index] + 1
 
   # Return updated tree topology.
-  tree = tree.replace(
-      children_index=batch_update(
-          tree.children_index, next_node_index, parent_index, k_action),
-      children_rewards=batch_update(
-          tree.children_rewards, step.reward, parent_index, k_action),
-      children_discounts=batch_update(
-          tree.children_discounts, step.discount, parent_index, k_action),
-      parents=batch_update(tree.parents, parent_index, next_node_index),
-      action_from_parent=batch_update(
-          tree.action_from_parent, k_action, next_node_index),
-      # Save the computed depth
-      node_depths=batch_update(
-          tree.node_depths, new_depths, next_node_index)
-      )
+  with jax.named_scope("expand_update_children"):
+    tree = tree.replace(
+        children_index=batch_update(
+            tree.children_index, next_node_index, parent_index, k_action),
+        children_rewards=batch_update(
+            tree.children_rewards, step.reward, parent_index, k_action),
+        children_discounts=batch_update(
+            tree.children_discounts, step.discount, parent_index, k_action),
+        parents=batch_update(tree.parents, parent_index, next_node_index),
+        action_from_parent=batch_update(
+            tree.action_from_parent, k_action, next_node_index),
+        # Save the computed depth
+        node_depths=batch_update(
+            tree.node_depths, new_depths, next_node_index)
+        )
   leaf_memo = _LeafMemo(
       leaf_reward=step.reward,
       leaf_discount=step.discount,
@@ -440,9 +442,10 @@ def backward_opt(tree, path_memo, path_depth, leaf_memo):
         return (i - 1, new_g, new_node_val, d_n_vis, d_n_val, d_e_vis, d_e_val)
 
     # 3. Run Loop
-    _, _, _, final_d_n_vis, final_d_n_val, final_d_e_vis, final_d_e_val = jax.lax.while_loop(
-        cond_fun, body_fun, init_state
-    )
+    with jax.named_scope("ob_while"):
+      _, _, _, final_d_n_vis, final_d_n_val, final_d_e_vis, final_d_e_val = jax.lax.while_loop(
+          cond_fun, body_fun, init_state
+      )
 
     # 4. Apply Updates using Dense Matmul Helpers
     def _apply_backward_update(node_visits, deltas, path_indices):
@@ -675,6 +678,7 @@ def instantiate_tree_from_root(
       extra_data=extra_data)
 
   root_index = jnp.full([batch_size], Tree.ROOT_INDEX)
-  tree = update_tree_node(
-      tree, root_index, root.k_indices, root.prior_logits, root.value, root.embedding)
+  with jax.named_scope("init_update_node"):
+    tree = update_tree_node(
+        tree, root_index, root.k_indices, root.prior_logits, root.value, root.embedding)
   return tree
