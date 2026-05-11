@@ -41,6 +41,7 @@ def search_opt(
     max_depth: Optional[int] = None,
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
+    use_opt_backward: bool = True,
 ) -> Tree:
   """Performs a full search and returns sampled actions (while_loop version)."""
 
@@ -83,9 +84,10 @@ def search_opt(
     # Select parent/action according to the policy for this simulation.
 
     # parent_index, k_action, path_parent, path_action, path_depth = simulate(
-    parent_index, k_action, path_memo, path_depth = simulate(
-        simulate_keys, tree, action_selection_fn, max_depth
-    )
+    with jax.named_scope("opt_simulate"):
+      parent_index, k_action, path_memo, path_depth = simulate(
+          simulate_keys, tree, action_selection_fn, max_depth
+      )
 
     # Node created at sim i will have index i+1; 0 is root.
     next_node_index = tree.children_index[batch_range, parent_index, k_action]
@@ -102,7 +104,8 @@ def search_opt(
 
     # Backpropagate value/visits.
     # tree = backward(tree, next_node_index)
-    tree = backward_wrap(tree, next_node_index, path_memo, path_depth, leaf_memo)
+    with jax.named_scope("opt_backward"):
+      tree = backward_wrap(tree, next_node_index, path_memo, path_depth, leaf_memo, use_opt_backward=use_opt_backward)
 
     return (i + 1, key, tree)
 
@@ -266,8 +269,7 @@ def simulate(
       # path_action=path_action)
 
   # pytype: enable=wrong-arg-types
-  with jax.named_scope("opt_simulate"):
-    end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
+  end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
 
   # Returning a node with a selected action.
   # The action can be already visited, if the max_depth is reached.
@@ -350,9 +352,10 @@ def expand(
   )
   return (tree, leaf_memo)
 
-def backward_wrap(tree, leaf_index, path_memo, path_depth, leaf_memo):
-  return backward_opt(tree, path_memo, path_depth, leaf_memo)
-  # return backward(tree, leaf_index)
+def backward_wrap(tree, leaf_index, path_memo, path_depth, leaf_memo, use_opt_backward=True):
+  if use_opt_backward:
+    return backward_opt(tree, path_memo, path_depth, leaf_memo)
+  return backward(tree, leaf_index)
 
 def backward_opt(tree, path_memo, path_depth, leaf_memo):
     batch_size = tree.node_visits.shape[0]
@@ -566,7 +569,7 @@ def backward(
 
   leaf_index = jnp.asarray(leaf_index, dtype=jnp.int32)
   loop_state = (tree, tree.node_values[leaf_index], leaf_index)
-  with jax.named_scope("opt_backward"):
+  with jax.named_scope("reg_backward"):
     tree, _, _ = jax.lax.while_loop(cond_fun, body_fun, loop_state)
 
   return tree

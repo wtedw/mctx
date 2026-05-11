@@ -2139,6 +2139,7 @@ def gumbel_muzero_policy_opt(
     return_search_tree: bool = False,
     use_muesli: bool = False,
     muesli_beta: float = 2.0,
+    use_opt_backward: bool = True,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2233,7 +2234,9 @@ def gumbel_muzero_policy_opt(
       num_simulations=num_simulations,
       max_depth=max_depth,
       invalid_actions=k_invalid_actions,
-      extra_data=extra_data)
+      extra_data=extra_data,
+      use_opt_backward=use_opt_backward
+  )
   summary = search_tree.summary(include_metrics=return_summary)
 
   # Acting with the best action from the most visited actions.
