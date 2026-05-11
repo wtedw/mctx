@@ -358,35 +358,37 @@ def backward_wrap(tree, leaf_index, path_memo, path_depth, leaf_memo, use_opt_ba
   return backward(tree, leaf_index)
 
 def backward_opt(tree, path_memo, path_depth, leaf_memo):
-    batch_size = tree.node_visits.shape[0]
-    # Static MAX_DEPTH from the allocation (e.g., 512)
-    MAX_DEPTH = path_memo.parent.shape[1]
+    with jax.named_scope("ob_init"):
+      batch_size = tree.node_visits.shape[0]
+      # Static MAX_DEPTH from the allocation (e.g., 512)
+      MAX_DEPTH = path_memo.parent.shape[1]
 
-    # 1. Allocate Delta Arrays [MAX_DEPTH, Batch]
-    # We transpose to [L, B] to match the 'apply' helper expectation and for easier loop indexing
-    delta_shape = (MAX_DEPTH, batch_size)
-    d_node_visits = jnp.zeros(delta_shape, dtype=jnp.int32)
-    d_node_values = jnp.zeros(delta_shape, dtype=jnp.float32)
-    d_edge_visits = jnp.zeros(delta_shape, dtype=jnp.int32)
-    d_edge_values = jnp.zeros(delta_shape, dtype=jnp.float32)
+      # 1. Allocate Delta Arrays [MAX_DEPTH, Batch]
+      # We transpose to [L, B] to match the 'apply' helper expectation and for easier loop indexing
+      delta_shape = (MAX_DEPTH, batch_size)
+      d_node_visits = jnp.zeros(delta_shape, dtype=jnp.int32)
+      d_node_values = jnp.zeros(delta_shape, dtype=jnp.float32)
+      d_edge_visits = jnp.zeros(delta_shape, dtype=jnp.int32)
+      d_edge_values = jnp.zeros(delta_shape, dtype=jnp.float32)
 
-    # 2. Setup Loop State
-    # Start at the deepest active path in the batch
-    start_i = jnp.max(path_depth) - 1
+      # 2. Setup Loop State
+      # Start at the deepest active path in the batch
+      start_i = jnp.max(path_depth) - 1
 
-    init_state = (
-        start_i,
-        jnp.zeros(batch_size, dtype=jnp.float32), # running_g
-        jnp.zeros(batch_size, dtype=jnp.float32), # child_node_val_prev
-        d_node_visits,
-        d_node_values,
-        d_edge_visits,
-        d_edge_values
-    )
+      init_state = (
+          start_i,
+          jnp.zeros(batch_size, dtype=jnp.float32), # running_g
+          jnp.zeros(batch_size, dtype=jnp.float32), # child_node_val_prev
+          d_node_visits,
+          d_node_values,
+          d_edge_visits,
+          d_edge_values
+      )
 
     def cond_fun(state):
-        i, _, _, _, _, _, _ = state
-        return i >= 0
+        with jax.named_scope("ob_cond"):
+          i, _, _, _, _, _, _ = state
+          return i >= 0
 
     def body_fun(state):
         i, running_g, child_node_val_prev, d_n_vis, d_n_val, d_e_vis, d_e_val = state
@@ -396,41 +398,45 @@ def backward_opt(tree, path_memo, path_depth, leaf_memo):
 
         # Fetch stats from MEMO (Slice [B, L] -> [B])
         # This is fast/coalesced memory access
-        old_node_val = path_memo.node_values[:, i]
-        old_node_visits = path_memo.node_visits[:, i]
-        memo_reward = path_memo.children_rewards[:, i]
-        memo_discount = path_memo.children_discounts[:, i]
-        old_edge_val = path_memo.children_values[:, i]
+        with jax.named_scope("ob_gather_nvals"):
+          old_node_val = path_memo.node_values[:, i]
+          old_node_visits = path_memo.node_visits[:, i]
+          memo_reward = path_memo.children_rewards[:, i]
+          memo_discount = path_memo.children_discounts[:, i]
+          old_edge_val = path_memo.children_values[:, i]
 
         # Calculate Values
-        reward = jnp.where(is_leaf, leaf_memo.leaf_reward, memo_reward)
-        discount = jnp.where(is_leaf, leaf_memo.leaf_discount, memo_discount)
-        val_coming_up = jnp.where(is_leaf, leaf_memo.leaf_value, running_g)
+        with jax.named_scope("ob_comp_values"):
+          reward = jnp.where(is_leaf, leaf_memo.leaf_reward, memo_reward)
+          discount = jnp.where(is_leaf, leaf_memo.leaf_discount, memo_discount)
+          val_coming_up = jnp.where(is_leaf, leaf_memo.leaf_value, running_g)
 
-        # Bellman: G = R + gamma * V_next
-        new_g = reward + discount * val_coming_up
+          # Bellman: G = R + gamma * V_next
+          new_g = reward + discount * val_coming_up
 
-        # Mean Update: V_new = (V_old * N + G) / (N + 1)
-        new_node_val = (old_node_val * old_node_visits + new_g) / (old_node_visits + 1.0)
+          # Mean Update: V_new = (V_old * N + G) / (N + 1)
+          new_node_val = (old_node_val * old_node_visits + new_g) / (old_node_visits + 1.0)
 
-        # Edge Update (Standard MCTS: edge tracks child value)
-        new_edge_val = jnp.where(is_leaf, leaf_memo.leaf_value, child_node_val_prev)
+          # Edge Update (Standard MCTS: edge tracks child value)
+          new_edge_val = jnp.where(is_leaf, leaf_memo.leaf_value, child_node_val_prev)
 
-        # Compute Deltas (Masked by active)
-        # Note: We store difference to apply via scatter-add style matmul later
-        # dnv = jnp.where(active, 1, 0).astype(jnp.int32)
-        dnv = active.astype(jnp.int32)
-        dnval = jnp.where(active, new_node_val - old_node_val, 0.0).astype(jnp.float32)
-        # dev = jnp.where(active, 1, 0).astype(jnp.int32)
-        dev = active.astype(jnp.int32)
-        deval = jnp.where(active, new_edge_val - old_edge_val, 0.0).astype(jnp.float32)
+        with jax.named_scope("ob_comp_deltas"):
+          # Compute Deltas (Masked by active)
+          # Note: We store difference to apply via scatter-add style matmul later
+          # dnv = jnp.where(active, 1, 0).astype(jnp.int32)
+          dnv = active.astype(jnp.int32)
+          dnval = jnp.where(active, new_node_val - old_node_val, 0.0).astype(jnp.float32)
+          # dev = jnp.where(active, 1, 0).astype(jnp.int32)
+          dev = active.astype(jnp.int32)
+          deval = jnp.where(active, new_edge_val - old_edge_val, 0.0).astype(jnp.float32)
 
         # Store in Delta Arrays
         # .at[i].set(...) inside while_loop lowers to efficient dynamic_update_slice
-        d_n_vis = d_n_vis.at[i].set(dnv)
-        d_n_val = d_n_val.at[i].set(dnval)
-        d_e_vis = d_e_vis.at[i].set(dev)
-        d_e_val = d_e_val.at[i].set(deval)
+        with jax.named_scope("ob_scatter_deltas"):
+          d_n_vis = d_n_vis.at[i].set(dnv)
+          d_n_val = d_n_val.at[i].set(dnval)
+          d_e_vis = d_e_vis.at[i].set(dev)
+          d_e_val = d_e_val.at[i].set(deval)
 
         return (i - 1, new_g, new_node_val, d_n_vis, d_n_val, d_e_vis, d_e_val)
 
