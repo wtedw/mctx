@@ -192,36 +192,40 @@ def simulate(
 
   def body_fun(state):
     # Preparing the next simulation state.
-    node_index = state.next_node_index
-    rng_key, action_selection_key = jax.random.split(state.rng_key)
+    with jax.named_scope("osim_prep"):
+      node_index = state.next_node_index
+      rng_key, action_selection_key = jax.random.split(state.rng_key)
 
-    k_action = action_selection_fn(action_selection_key, tree, node_index,
-                                 state.depth)
-    next_node_index = tree.children_index[node_index, k_action]
+      k_action = action_selection_fn(action_selection_key, tree, node_index,
+                                  state.depth)
+      next_node_index = tree.children_index[node_index, k_action]
 
-    path_parent = state.path_memo.parent.at[state.depth].set(node_index)
-    path_action = state.path_memo.action.at[state.depth].set(k_action)
-    path_node_values = state.path_memo.node_values.at[state.depth].set(tree.node_values[node_index])
-    path_node_visits = state.path_memo.node_visits.at[state.depth].set(tree.node_visits[node_index])
-    path_children_values = state.path_memo.children_values.at[state.depth].set(tree.children_values[node_index, k_action])
-    # path_children_node_values = state.path_memo.children_node_values.at[state.depth].set(tree.node_values[next_node_index])
-    path_children_rewards = state.path_memo.children_rewards.at[state.depth].set(tree.children_rewards[node_index, k_action])
-    path_children_discounts = state.path_memo.children_discounts.at[state.depth].set(tree.children_discounts[node_index, k_action])
-    path_memo = _PathMemo(
-        parent=path_parent,
-        action=path_action,
-        node_values=path_node_values,
-        node_visits=path_node_visits,
-        children_discounts=path_children_discounts,
-        children_values=path_children_values,
-        children_rewards=path_children_rewards,
-    )
+    with jax.named_scope("osim_scatter_memo"):
+      path_parent = state.path_memo.parent.at[state.depth].set(node_index)
+      path_action = state.path_memo.action.at[state.depth].set(k_action)
+      path_node_values = state.path_memo.node_values.at[state.depth].set(tree.node_values[node_index])
+      path_node_visits = state.path_memo.node_visits.at[state.depth].set(tree.node_visits[node_index])
+      path_children_values = state.path_memo.children_values.at[state.depth].set(tree.children_values[node_index, k_action])
+      # path_children_node_values = state.path_memo.children_node_values.at[state.depth].set(tree.node_values[next_node_index])
+      path_children_rewards = state.path_memo.children_rewards.at[state.depth].set(tree.children_rewards[node_index, k_action])
+      path_children_discounts = state.path_memo.children_discounts.at[state.depth].set(tree.children_discounts[node_index, k_action])
+      path_memo = _PathMemo(
+          parent=path_parent,
+          action=path_action,
+          node_values=path_node_values,
+          node_visits=path_node_visits,
+          children_discounts=path_children_discounts,
+          children_values=path_children_values,
+          children_rewards=path_children_rewards,
+      )
 
     # The returned action will be visited.
-    depth = state.depth + 1
-    is_before_depth_cutoff = depth < max_depth
-    is_visited = next_node_index != Tree.UNVISITED
-    is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
+    with jax.named_scope("osim_check"):
+      depth = state.depth + 1
+      is_before_depth_cutoff = depth < max_depth
+      is_visited = next_node_index != Tree.UNVISITED
+      is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
+
     return _SimulationState(  # pytype: disable=wrong-arg-types  # jax-types
         rng_key=rng_key,
         node_index=node_index,
@@ -234,42 +238,44 @@ def simulate(
         # path_parent=path_parent,
         # path_action=path_action)
 
-  node_index = jnp.array(Tree.ROOT_INDEX, dtype=jnp.int32)
-  depth = jnp.zeros((), dtype=jnp.int32)
+  with jax.named_scope("osim_init"):
+    node_index = jnp.array(Tree.ROOT_INDEX, dtype=jnp.int32)
+    depth = jnp.zeros((), dtype=jnp.int32)
 
-  path_memo = _PathMemo(
-      parent=jnp.zeros((max_depth,)),
-      action=jnp.zeros((max_depth,)),
-      node_values=jnp.zeros((max_depth,)),
-      node_visits=jnp.zeros((max_depth,)),
-      children_discounts=jnp.zeros((max_depth,)),
-      children_values=jnp.zeros((max_depth,)),
-      children_rewards=jnp.zeros((max_depth,)),
-  )
-  # path_parent = jnp.zeros((max_depth,))
-  # path_action = jnp.zeros((max_depth,))
-  # path_node_values = jnp.zeros((max_depth,))
-  # path_children_values = jnp.zeros((max_depth,))
-  # path_children_rewards = jnp.zeros((max_depth,))
-  # path_children_discounts = jnp.zeros((max_depth,))
+    path_memo = _PathMemo(
+        parent=jnp.zeros((max_depth,)),
+        action=jnp.zeros((max_depth,)),
+        node_values=jnp.zeros((max_depth,)),
+        node_visits=jnp.zeros((max_depth,)),
+        children_discounts=jnp.zeros((max_depth,)),
+        children_values=jnp.zeros((max_depth,)),
+        children_rewards=jnp.zeros((max_depth,)),
+    )
+    # path_parent = jnp.zeros((max_depth,))
+    # path_action = jnp.zeros((max_depth,))
+    # path_node_values = jnp.zeros((max_depth,))
+    # path_children_values = jnp.zeros((max_depth,))
+    # path_children_rewards = jnp.zeros((max_depth,))
+    # path_children_discounts = jnp.zeros((max_depth,))
 
 
-  # pytype: disable=wrong-arg-types  # jnp-type
-  initial_state = _SimulationState(
-      rng_key=rng_key,
-      node_index=tree.NO_PARENT,
-      action=tree.NO_PARENT,
-      next_node_index=node_index,
-      depth=depth,
-      # is_continuing=jnp.array(True))
-      is_continuing=jnp.array(True),
-      path_memo=path_memo,
-  )
-      # path_parent=path_parent,
-      # path_action=path_action)
+    # pytype: disable=wrong-arg-types  # jnp-type
+    initial_state = _SimulationState(
+        rng_key=rng_key,
+        node_index=tree.NO_PARENT,
+        action=tree.NO_PARENT,
+        next_node_index=node_index,
+        depth=depth,
+        # is_continuing=jnp.array(True))
+        is_continuing=jnp.array(True),
+        path_memo=path_memo,
+    )
+        # path_parent=path_parent,
+        # path_action=path_action)
 
   # pytype: enable=wrong-arg-types
-  end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
+  with jax.named_scope("osim_while"):
+    end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
 
   # Returning a node with a selected action.
   # The action can be already visited, if the max_depth is reached.
