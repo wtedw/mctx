@@ -67,23 +67,16 @@ def search_opt(
       extra_data=extra_data,
   )
 
-  # ---- while_loop body over simulations ----
-  # Carry only what *changes*: (i, rng_key, tree).
-  def cond_fun(carry):
-    i, _, _ = carry
-    return i < num_simulations
-
-  def body_fun(carry):
-    i, key, tree = carry
+  # ---- scan body over simulations ----
+  # Carry: (rng_key, tree). Simulation index i comes from xs.
+  def scan_body(carry, i):
+    key, tree = carry
     # Split RNG: one for simulate (batched), one for expand.
     key, simulate_key, expand_key = jax.random.split(key, 3)
 
     # simulate is vmapped; give it B distinct keys.
     simulate_keys = jax.random.split(simulate_key, batch_size)
 
-    # Select parent/action according to the policy for this simulation.
-
-    # parent_index, k_action, path_parent, path_action, path_depth = simulate(
     with jax.named_scope("opt_simulate"):
       parent_index, k_action, path_memo, path_depth = simulate(
           simulate_keys, tree, action_selection_fn, max_depth
@@ -103,16 +96,16 @@ def search_opt(
       )
 
     # Backpropagate value/visits.
-    # tree = backward(tree, next_node_index)
     with jax.named_scope("opt_backward"):
       tree = backward_wrap(tree, next_node_index, path_memo, path_depth, leaf_memo, use_opt_backward=use_opt_backward)
 
-    return (i + 1, key, tree)
+    return (key, tree), None
 
   # Run the loop with a lean carry. params/root/etc. are closed-over constants.
   def run_loop(rng_key, tree):
-    init = (jnp.array(0, dtype=jnp.int32), rng_key, tree)
-    _, _, tree = jax.lax.while_loop(cond_fun, body_fun, init)
+    (_, tree), _ = jax.lax.scan(
+        scan_body, (rng_key, tree), jnp.arange(num_simulations, dtype=jnp.int32)
+    )
     return tree
 
   # Donate the big mutable state (tree) so XLA can alias its buffers.
