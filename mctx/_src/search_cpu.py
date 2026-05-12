@@ -156,19 +156,21 @@ def search_cpu(
     _backward = jax.jit(backward)
 
     # ---- Pre-compile recurrent_fn for the accelerator ----
-    # out_shardings=cpu_sh tells XLA to place every output leaf back on the CPU,
-    # so no explicit device_put loop is needed after the call.  XLA can also
-    # overlap the transfer with other computation.
-    _rf_acc = jax.jit(recurrent_fn, out_shardings=cpu_sh)
+    # out_shardings cannot be used here: params may span multiple accelerator
+    # devices (e.g. NamedSharding across a TPU mesh), and JAX does not allow
+    # a JIT whose inputs live on N devices to declare outputs on a different
+    # single CPU device.  Instead we transfer outputs explicitly after the call.
+    _rf_acc = jax.jit(recurrent_fn)
 
     def offloaded_recurrent_fn(params, rng_key, action, embedding):
-      # Move the small per-step tensors to the accelerator.
-      # params are left untouched — the caller is responsible for their placement.
       action_a = jax.device_put(action, acc_sh)
       emb_a = jax.tree.map(lambda x: jax.device_put(x, acc_sh), embedding)
       rng_a = jax.device_put(rng_key, rng_sh)
-      # Outputs land in cpu_sh (pinned_host) automatically via out_shardings.
-      return _rf_acc(params, rng_a, action_a, emb_a)
+      step_a, new_emb_a = _rf_acc(params, rng_a, action_a, emb_a)
+      # Gather outputs from the accelerator back to CPU.
+      step    = jax.tree.map(lambda x: jax.device_put(x, cpu_sh), step_a)
+      new_emb = jax.tree.map(lambda x: jax.device_put(x, cpu_sh), new_emb_a)
+      return step, new_emb
 
     batch_range = jnp.arange(batch_size)
 
