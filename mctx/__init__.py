@@ -28,6 +28,7 @@ from mctx._src.base import RecurrentFnOutput
 from mctx._src.base import RecurrentState
 from mctx._src.base import RootActionSelectionFn
 from mctx._src.base import RootFnOutput
+from mctx._src.policies import gumbel_muzero_policy_cpu
 from mctx._src.policies import gumbel_muzero_policy_sh2
 from mctx._src.policies import gumbel_muzero_policy_bfs3
 from mctx._src.policies import gumbel_muzero_policy_bfs2
@@ -46,6 +47,7 @@ from mctx._src.qtransforms import qtransform_completed_by_mix_value2
 from mctx._src.search import search
 from mctx._src.search2 import search2
 from mctx._src.search_bnk import search_bnk
+from mctx._src.search_cpu import search_cpu
 from mctx._src.search_opt import search_opt
 from mctx._src.tree import Tree
 
@@ -66,6 +68,7 @@ __all__ = (
     "Tree",
     "gumbel_muzero_interior_action_selection",
     "gumbel_muzero_policy",
+    "gumbel_muzero_policy_cpu",
     "gumbel_muzero_policy2",
     "gumbel_muzero_policy3",
     "gumbel_muzero_policy_opt",
@@ -84,6 +87,7 @@ __all__ = (
     "search",
     "search2",
     "search_bnk",
+    "search_cpu",
     "search_opt",
     "stochastic_muzero_policy",
 )

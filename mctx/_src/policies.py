@@ -26,6 +26,7 @@ from mctx._src import qtransforms
 from mctx._src import search
 from mctx._src import search2
 from mctx._src import search_bnk
+from mctx._src import search_cpu
 from mctx._src import search_opt
 from mctx._src import seq_halving
 
@@ -1621,6 +1622,139 @@ def gumbel_muzero_policy(
       final_score=to_argmax,
       raw_value=root.value,
   )
+
+def gumbel_muzero_policy_cpu(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    num_simulations: int,
+    invalid_actions: Optional[chex.Array] = None,
+    max_depth: Optional[int] = None,
+    *,
+    qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
+    max_num_considered_actions: int = 16,
+    gumbel_scale: chex.Numeric = 1.,
+    accelerator_sharding=None,
+) -> base.PolicyOutput:
+  """Gumbel MuZero with CPU-resident tree and accelerator-offloaded recurrent_fn.
+
+  Identical semantics to gumbel_muzero_policy, but the MCTS tree lives in CPU
+  memory and only recurrent_fn (the neural-net forward pass) runs on the
+  accelerator.  This avoids slow random-access gathers on TPU for large
+  simulation counts (thousands of simulations per move).
+
+  Because the search loop is a Python for-loop (not a compiled while_loop),
+  this function must NOT be called inside jax.jit.  JIT the root computation
+  (model.apply) separately before calling this policy.
+
+  Args:
+    params: model parameters.  Must already reside on the accelerator — this
+      function does not move them.
+    rng_key: PRNG key; consumed.
+    root: root node outputs; moved to CPU internally.
+    recurrent_fn: called once per simulation on the accelerator.
+    num_simulations: number of MCTS simulations.
+    invalid_actions: boolean mask, shape [B, num_actions]; moved to CPU.
+    max_depth: maximum search depth (defaults to num_simulations).
+    qtransform: Q-value transform used for action selection and final scores.
+    max_num_considered_actions: max actions considered at root (Sequential
+      Halving parameter).
+    gumbel_scale: scale for Gumbel noise (use 0.0 for greedy evaluation).
+    accelerator_sharding: jax.sharding.Sharding for the accelerator.  Defaults
+      to SingleDeviceSharding(jax.devices()[0]).  For data-parallel inference
+      pass e.g. NamedSharding(Mesh(jax.devices(), 'x'), PartitionSpec('x')).
+
+  Returns:
+    PolicyOutput with the same fields as gumbel_muzero_policy.
+  """
+  cpu = jax.devices('cpu')[0]
+  cpu_sh = jax.sharding.SingleDeviceSharding(cpu)
+
+  with jax.default_device(cpu):
+    # ---- Move root and auxiliaries to CPU ----
+    root = base.RootFnOutput(
+        prior_logits=jax.device_put(root.prior_logits, cpu_sh),
+        value=jax.device_put(root.value, cpu_sh),
+        embedding=jax.tree.map(
+            lambda x: jax.device_put(x, cpu_sh), root.embedding),
+    )
+    if invalid_actions is not None:
+      invalid_actions = jax.device_put(invalid_actions, cpu_sh)
+
+    # ---- Mask invalid actions and generate Gumbel (on CPU) ----
+    root = root.replace(
+        prior_logits=_mask_invalid_actions(root.prior_logits, invalid_actions))
+
+    rng_key = jax.device_put(rng_key, cpu_sh)
+    rng_key, gumbel_rng = jax.random.split(rng_key)
+    gumbel = gumbel_scale * jax.random.gumbel(
+        gumbel_rng,
+        shape=root.prior_logits.shape,
+        dtype=root.prior_logits.dtype)
+
+    extra_data = action_selection.GumbelMuZeroExtraData(root_gumbel=gumbel)
+
+    # ---- Search with CPU tree, accelerator recurrent_fn ----
+    search_tree = search_cpu.search_cpu(
+        params=params,
+        rng_key=rng_key,
+        root=root,
+        recurrent_fn=recurrent_fn,
+        root_action_selection_fn=functools.partial(
+            action_selection.gumbel_muzero_root_action_selection,
+            num_simulations=num_simulations,
+            max_num_considered_actions=max_num_considered_actions,
+            qtransform=qtransform,
+        ),
+        interior_action_selection_fn=functools.partial(
+            action_selection.gumbel_muzero_interior_action_selection,
+            qtransform=qtransform,
+        ),
+        num_simulations=num_simulations,
+        max_depth=max_depth,
+        invalid_actions=invalid_actions,
+        extra_data=extra_data,
+        accelerator_sharding=accelerator_sharding,
+    )
+
+    # ---- Post-processing (tree is on CPU, so all ops run on CPU) ----
+    summary = search_tree.summary()
+    considered_visit = jnp.max(summary.visit_counts, axis=-1, keepdims=True)
+    completed_qvalues = jax.vmap(qtransform, in_axes=[0, None])(
+        search_tree, search_tree.ROOT_INDEX)
+    to_argmax = seq_halving.score_considered(
+        considered_visit, gumbel, root.prior_logits, completed_qvalues,
+        summary.visit_counts)
+    action = action_selection.masked_argmax(to_argmax, invalid_actions)
+
+    search_tree = search_tree.replace(
+        completed_qvalues=completed_qvalues,
+        to_argmax=to_argmax,
+    )
+
+    completed_search_logits = _mask_invalid_actions(
+        root.prior_logits + completed_qvalues, invalid_actions)
+    action_weights = jax.nn.softmax(completed_search_logits)
+
+    search_logits = root.prior_logits + completed_qvalues
+    children_indices = search_tree.children_index[:, 0]
+    children_values = jnp.take_along_axis(
+        search_tree.node_values, children_indices, axis=1)
+
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+      search_tree=search_tree,
+      search_logits=search_logits,
+      children_values=children_values,
+      root_gumbel=gumbel,
+      root_prior_logits=root.prior_logits,
+      final_qvalues=completed_qvalues,
+      final_score=to_argmax,
+      raw_value=root.value,
+  )
+
 
 def gumbel_muzero_policy2(
     params: base.Params,
