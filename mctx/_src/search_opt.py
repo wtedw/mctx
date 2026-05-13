@@ -194,22 +194,18 @@ def simulate(
       next_node_index = tree.children_index[node_index, k_action]
 
     with jax.named_scope("osim_scatter_memo"):
-      path_parent = state.path_memo.parent.at[state.depth].set(node_index)
-      path_action = state.path_memo.action.at[state.depth].set(k_action)
-      path_node_values = state.path_memo.node_values.at[state.depth].set(tree.node_values[node_index])
-      path_node_visits = state.path_memo.node_visits.at[state.depth].set(tree.node_visits[node_index])
-      path_children_values = state.path_memo.children_values.at[state.depth].set(tree.children_values[node_index, k_action])
-      # path_children_node_values = state.path_memo.children_node_values.at[state.depth].set(tree.node_values[next_node_index])
-      path_children_rewards = state.path_memo.children_rewards.at[state.depth].set(tree.children_rewards[node_index, k_action])
-      path_children_discounts = state.path_memo.children_discounts.at[state.depth].set(tree.children_discounts[node_index, k_action])
+      # Replace dynamic_update_slice (scatter) with one_hot + multiply-add so
+      # XLA lowers to dense vector ops instead of stalling on a dynamic index.
+      oh = jax.nn.one_hot(state.depth, max_depth)  # [max_depth]
+      zm = 1.0 - oh
       path_memo = _PathMemo(
-          parent=path_parent,
-          action=path_action,
-          node_values=path_node_values,
-          node_visits=path_node_visits,
-          children_discounts=path_children_discounts,
-          children_values=path_children_values,
-          children_rewards=path_children_rewards,
+          parent=state.path_memo.parent * zm + oh * node_index,
+          action=state.path_memo.action * zm + oh * k_action,
+          node_values=state.path_memo.node_values * zm + oh * tree.node_values[node_index],
+          node_visits=state.path_memo.node_visits * zm + oh * tree.node_visits[node_index],
+          children_values=state.path_memo.children_values * zm + oh * tree.children_values[node_index, k_action],
+          children_rewards=state.path_memo.children_rewards * zm + oh * tree.children_rewards[node_index, k_action],
+          children_discounts=state.path_memo.children_discounts * zm + oh * tree.children_discounts[node_index, k_action],
       )
 
     # The returned action will be visited.
