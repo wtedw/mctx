@@ -195,7 +195,7 @@ def simulate(
       # Replace tree.children_index[node_index, k_action] (2D dynamic gather)
       # with two one_hot matmuls. oh_n is shared/CSE'd with the reads inside
       # action_selection_fn and qtransform which use the same node_index.
-      oh_n = jax.nn.one_hot(node_index, tree.num_simulations, dtype=jnp.int32)
+      oh_n = jax.nn.one_hot(node_index, tree.children_index.shape[-2], dtype=jnp.int32)
       oh_k = jax.nn.one_hot(k_action, tree.num_actions, dtype=jnp.int32)
       ci_row = jnp.einsum('n,na->a', oh_n, tree.children_index)  # [A]
       # next_node_index = tree.children_index[node_index, k_action]

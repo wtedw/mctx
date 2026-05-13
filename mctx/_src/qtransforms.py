@@ -240,7 +240,8 @@ def qtransform_completed_by_mix_value(
     Completed Q-values. Shape `[num_actions]`.
   """
   chex.assert_shape(node_index, ())
-  oh = jax.nn.one_hot(node_index, tree.num_simulations)
+  # num_nodes = num_simulations + 1; shape[-2] gives N for [B,N,A] or [N,A]
+  oh = jax.nn.one_hot(node_index, tree.children_visits.shape[-2])
   # qvalues = tree.qvalues(node_index)
   rewards_row   = jnp.einsum('n,na->a', oh, tree.children_rewards)
   discounts_row = jnp.einsum('n,na->a', oh, tree.children_discounts)

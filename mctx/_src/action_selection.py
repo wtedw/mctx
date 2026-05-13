@@ -196,7 +196,7 @@ def gumbel_muzero_interior_action_selection(
   """
   # del rng_key, depth
   chex.assert_shape([node_index], ())
-  oh = jax.nn.one_hot(node_index, tree.num_simulations)
+  oh = jax.nn.one_hot(node_index, tree.children_visits.shape[-2])
   # visit_counts = tree.children_visits[node_index]
   visit_counts = jnp.einsum('n,na->a', oh, tree.children_visits)
   # prior_logits = tree.children_prior_logits[node_index]
