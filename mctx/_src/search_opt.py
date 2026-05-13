@@ -191,21 +191,42 @@ def simulate(
 
       k_action = action_selection_fn(action_selection_key, tree, node_index,
                                   state.depth)
-      next_node_index = tree.children_index[node_index, k_action]
+
+      # Replace tree.children_index[node_index, k_action] (2D dynamic gather)
+      # with two one_hot matmuls. oh_n is shared/CSE'd with the reads inside
+      # action_selection_fn and qtransform which use the same node_index.
+      oh_n = jax.nn.one_hot(node_index, tree.num_simulations, dtype=jnp.int32)
+      oh_k = jax.nn.one_hot(k_action, tree.num_actions, dtype=jnp.int32)
+      ci_row = jnp.einsum('n,na->a', oh_n, tree.children_index)  # [A]
+      # next_node_index = tree.children_index[node_index, k_action]
+      next_node_index = jnp.dot(oh_k, ci_row)
 
     with jax.named_scope("osim_scatter_memo"):
-      # Replace dynamic_update_slice (scatter) with one_hot + multiply-add so
-      # XLA lowers to dense vector ops instead of stalling on a dynamic index.
-      oh = jax.nn.one_hot(state.depth, max_depth)  # [max_depth]
-      zm = 1.0 - oh
+      oh_d = jax.nn.one_hot(state.depth, max_depth)  # [max_depth]
+      zm_d = 1.0 - oh_d
+
+      # All [N] and [N,A] reads use oh_n (already traced above); XLA CSE
+      # merges these with the identical einsum calls inside qtransform /
+      # action_selection so each field is read from HBM exactly once per step.
+      oh_n_f  = oh_n.astype(jnp.float32)
+      oh_k_f  = oh_k.astype(jnp.float32)
+      node_val  = jnp.dot(oh_n_f, tree.node_values)                         # scalar
+      node_vis  = jnp.dot(oh_n_f, tree.node_visits)                         # scalar
+      val_row   = jnp.einsum('n,na->a', oh_n_f, tree.children_values)       # [A]
+      rew_row   = jnp.einsum('n,na->a', oh_n_f, tree.children_rewards)      # [A]
+      disc_row  = jnp.einsum('n,na->a', oh_n_f, tree.children_discounts)    # [A]
+      child_val  = jnp.dot(oh_k_f, val_row)
+      child_rew  = jnp.dot(oh_k_f, rew_row)
+      child_disc = jnp.dot(oh_k_f, disc_row)
+
       path_memo = _PathMemo(
-          parent=state.path_memo.parent * zm + oh * node_index,
-          action=state.path_memo.action * zm + oh * k_action,
-          node_values=state.path_memo.node_values * zm + oh * tree.node_values[node_index],
-          node_visits=state.path_memo.node_visits * zm + oh * tree.node_visits[node_index],
-          children_values=state.path_memo.children_values * zm + oh * tree.children_values[node_index, k_action],
-          children_rewards=state.path_memo.children_rewards * zm + oh * tree.children_rewards[node_index, k_action],
-          children_discounts=state.path_memo.children_discounts * zm + oh * tree.children_discounts[node_index, k_action],
+          parent=state.path_memo.parent * zm_d + oh_d * node_index,
+          action=state.path_memo.action * zm_d + oh_d * k_action,
+          node_values=state.path_memo.node_values * zm_d + oh_d * node_val,
+          node_visits=state.path_memo.node_visits * zm_d + oh_d * node_vis,
+          children_values=state.path_memo.children_values * zm_d + oh_d * child_val,
+          children_rewards=state.path_memo.children_rewards * zm_d + oh_d * child_rew,
+          children_discounts=state.path_memo.children_discounts * zm_d + oh_d * child_disc,
       )
 
     # The returned action will be visited.

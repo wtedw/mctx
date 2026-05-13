@@ -196,8 +196,11 @@ def gumbel_muzero_interior_action_selection(
   """
   # del rng_key, depth
   chex.assert_shape([node_index], ())
-  visit_counts = tree.children_visits[node_index]
-  prior_logits = tree.children_prior_logits[node_index]
+  oh = jax.nn.one_hot(node_index, tree.num_simulations)
+  # visit_counts = tree.children_visits[node_index]
+  visit_counts = jnp.einsum('n,na->a', oh, tree.children_visits)
+  # prior_logits = tree.children_prior_logits[node_index]
+  prior_logits = jnp.einsum('n,na->a', oh, tree.children_prior_logits)
   chex.assert_equal_shape([visit_counts, prior_logits])
   completed_qvalues = qtransform(tree, node_index)
 

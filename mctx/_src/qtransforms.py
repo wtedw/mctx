@@ -240,13 +240,20 @@ def qtransform_completed_by_mix_value(
     Completed Q-values. Shape `[num_actions]`.
   """
   chex.assert_shape(node_index, ())
-  qvalues = tree.qvalues(node_index)
-  visit_counts = tree.children_visits[node_index]
+  oh = jax.nn.one_hot(node_index, tree.num_simulations)
+  # qvalues = tree.qvalues(node_index)
+  rewards_row   = jnp.einsum('n,na->a', oh, tree.children_rewards)
+  discounts_row = jnp.einsum('n,na->a', oh, tree.children_discounts)
+  values_row    = jnp.einsum('n,na->a', oh, tree.children_values)
+  qvalues = rewards_row + discounts_row * values_row
+  # visit_counts = tree.children_visits[node_index]
+  visit_counts = jnp.einsum('n,na->a', oh, tree.children_visits)
 
   # Computing the mixed value and producing completed_qvalues.
-  raw_value = tree.raw_values[node_index]
-  prior_probs = jax.nn.softmax(
-      tree.children_prior_logits[node_index])
+  # raw_value = tree.raw_values[node_index]
+  raw_value = jnp.dot(oh, tree.raw_values)
+  # prior_probs = jax.nn.softmax(tree.children_prior_logits[node_index])
+  prior_probs = jax.nn.softmax(jnp.einsum('n,na->a', oh, tree.children_prior_logits))
   if use_mixed_value:
     value = _compute_mixed_value(
         raw_value,
