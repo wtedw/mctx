@@ -42,7 +42,7 @@ from mctx._src.policies import stochastic_muzero_policy
 from mctx._src.qtransforms import qtransform_by_min_max
 from mctx._src.qtransforms import qtransform_by_parent_and_siblings
 from mctx._src.qtransforms import qtransform_completed_by_mix_value
-from mctx._src.qtransforms import qtransform_completed_by_mix_value2
+
 from mctx._src.search import search
 from mctx._src.search2 import search2
 from mctx._src.search_bnk import search_bnk
@@ -80,7 +80,7 @@ __all__ = (
     "qtransform_by_min_max",
     "qtransform_by_parent_and_siblings",
     "qtransform_completed_by_mix_value",
-    "qtransform_completed_by_mix_value2",
+
     "search",
     "search2",
     "search_bnk",

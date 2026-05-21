@@ -2131,7 +2131,8 @@ def gumbel_muzero_policy_opt(
     *,
     interior_fn_normalize_advantages: bool = False,
     qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
-    final_qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value2,
+    interior_qtransform: Optional[base.QTransform] = None,
+    final_qtransform: base.QTransform = functools.partial(qtransforms.qtransform_completed_by_mix_value, return_extras=True),
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
     rehydrate_fields: bool = False,
@@ -2170,7 +2171,10 @@ def gumbel_muzero_policy_opt(
     max_depth: maximum search tree depth allowed during simulation.
     loop_fn: Function used to run the simulations. It may be required to pass
       hk.fori_loop if using this function inside a Haiku module.
-    qtransform: function to obtain completed Q-values for a node.
+    qtransform: function to obtain completed Q-values for root and (by default)
+      interior nodes.
+    interior_qtransform: if provided, overrides `qtransform` for interior
+      (non-root) node action selection. Defaults to `qtransform`.
     max_num_considered_actions: the maximum number of actions expanded at the
       root node. A smaller number of actions will be expanded if the number of
       valid actions is smaller.
@@ -2228,7 +2232,7 @@ def gumbel_muzero_policy_opt(
       interior_action_selection_fn=functools.partial(
           action_selection.gumbel_muzero_interior_action_selection,
           normalize_advantages=interior_fn_normalize_advantages,
-          qtransform=qtransform,
+          qtransform=interior_qtransform if interior_qtransform is not None else qtransform,
       ),
       num_k_actions=num_k_actions,
       num_simulations=num_simulations,
