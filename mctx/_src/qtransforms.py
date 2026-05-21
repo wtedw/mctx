@@ -208,7 +208,7 @@ def qtransform_completed_by_mix_value(
     *,
     value_scale: chex.Numeric = 0.1,
     maxvisit_init: chex.Numeric = 50.0,
-    rescale_values: bool = True,
+    rescale_values: bool = False,
     use_mixed_value: bool = True,
     epsilon: chex.Numeric = 1e-8,
     visit_exponent: chex.Numeric = 1.0,
