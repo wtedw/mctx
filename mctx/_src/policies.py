@@ -2132,7 +2132,7 @@ def gumbel_muzero_policy_opt(
     interior_fn_normalize_advantages: bool = False,
     qtransform: base.QTransform = qtransforms.qtransform_completed_by_mix_value,
     interior_qtransform: Optional[base.QTransform] = None,
-    final_qtransform: base.QTransform = functools.partial(qtransforms.qtransform_completed_by_mix_value, return_extras=True),
+    final_qtransform: base.QTransform = functools.partial(qtransforms.qtransform_completed_by_mix_value, return_extras=True, rescale_values=False),
     max_num_considered_actions: int = 16,
     gumbel_scale: chex.Numeric = 1.,
     rehydrate_fields: bool = False,
