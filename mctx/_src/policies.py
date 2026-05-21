@@ -2142,6 +2142,7 @@ def gumbel_muzero_policy_opt(
     muesli_beta: float = 2.0,
     use_opt_backward: bool = True,
     advantage_scale: float = 1.0,
+    use_advantage_weights: bool = False,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2289,20 +2290,22 @@ def gumbel_muzero_policy_opt(
   batch_idx = batch_range[:, None]  # [B, 1] broadcast to [B, K]
   full_advantages = jnp.zeros((batch_size, num_actions), dtype=final_advantages.dtype)
   full_advantages = full_advantages.at[batch_idx, k_indices].set(final_advantages)
-  full_search_logits = _mask_invalid_actions(
-      bna_prior_logits + full_advantages, invalid_actions)
-  action_weights = jax.nn.softmax(full_search_logits)
 
-  # for debugging
-  k_search_logits = _mask_invalid_actions(
-      k_masked_prior_logits + final_advantages, k_invalid_actions) # [B, K]
+  if use_advantage_weights:
+    full_search_logits = _mask_invalid_actions(
+        bna_prior_logits + advantage_scale * (full_advantages / final_scale[:, None]), invalid_actions)
+    k_search_logits = _mask_invalid_actions(
+        k_masked_prior_logits + advantage_scale * (final_advantages / final_scale[:, None]), k_invalid_actions)
+  else:
+    full_search_logits = _mask_invalid_actions(
+        bna_prior_logits + full_advantages, invalid_actions)
+    k_search_logits = _mask_invalid_actions(
+        k_masked_prior_logits + final_advantages, k_invalid_actions)
+  action_weights = jax.nn.softmax(full_search_logits)  # [B, A]
+
   k_action_weights = jax.nn.softmax(k_search_logits)  # [B, K]
   k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
-
-  adv_logits = _mask_invalid_actions(
-      bna_prior_logits + advantage_scale * (full_advantages / final_scale[:, None]), invalid_actions)
-  advantage_weights = jax.nn.softmax(adv_logits)  # [B, A]
 
   if rehydrate_fields:
     full_visit_probs = jnp.zeros((batch_size, num_actions), dtype=summary.visit_probs.dtype)
@@ -2331,7 +2334,7 @@ def gumbel_muzero_policy_opt(
         final_score=full_final_score,
         final_advantages=full_advantages,
         advantages=(full_advantages/final_scale[:, None]),
-        advantage_weights=advantage_weights,
+
         raw_value=root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
@@ -2361,7 +2364,7 @@ def gumbel_muzero_policy_opt(
         final_score=to_argmax,
         final_advantages=final_advantages,
         advantages=(final_advantages/final_scale[:, None]),
-        advantage_weights=advantage_weights,
+
         raw_value= root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
