@@ -133,6 +133,7 @@ class PolicyOutput(Generic[T]):
 
   advantages: Optional[Any] = None
   final_advantages: Optional[Any] = None
+  advantage_weights: Optional[Any] = None
 
 
 @chex.dataclass(frozen=True)

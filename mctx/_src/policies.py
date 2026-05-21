@@ -2141,6 +2141,7 @@ def gumbel_muzero_policy_opt(
     use_muesli: bool = False,
     muesli_beta: float = 2.0,
     use_opt_backward: bool = True,
+    advantage_scale: float = 1.0,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2269,12 +2270,12 @@ def gumbel_muzero_policy_opt(
   )
 
   # Center advantages around v_pi for both branches.
-  k_advantages = completed_qvalues - sigma_v_pi[:, None]
+  k_scaled_advantages = completed_qvalues - sigma_v_pi[:, None]
   if use_muesli:
 
       # 1. # Std-normalize
-      adv_std = jnp.std(k_advantages, axis=-1, keepdims=True)
-      norm_advantages = k_advantages / (adv_std + 1e-8)
+      adv_std = jnp.std(k_scaled_advantages, axis=-1, keepdims=True)
+      norm_advantages = k_scaled_advantages / (adv_std + 1e-8)
 
       # 2. Clip and construct target
       norm_advantages = jnp.clip(norm_advantages, -2.0, 2.0)
@@ -2282,7 +2283,7 @@ def gumbel_muzero_policy_opt(
       # 3. We add the stable signal to the logits
       final_advantages = (muesli_beta * norm_advantages)
   else:
-      final_advantages = k_advantages
+      final_advantages = k_scaled_advantages
 
   ### Construct trainable action_weights
   batch_idx = batch_range[:, None]  # [B, 1] broadcast to [B, K]
@@ -2298,6 +2299,10 @@ def gumbel_muzero_policy_opt(
   k_action_weights = jax.nn.softmax(k_search_logits)  # [B, K]
   k_children_indices = search_tree.children_index[:, 0]  # [B, k_num_actions]
   k_children_values = jnp.take_along_axis(search_tree.node_values, k_children_indices, axis=1)  # [B, k_num_actions]
+
+  adv_logits = _mask_invalid_actions(
+      bna_prior_logits + advantage_scale * (full_advantages / final_scale[:, None]), invalid_actions)
+  advantage_weights = jax.nn.softmax(adv_logits)  # [B, A]
 
   if rehydrate_fields:
     full_visit_probs = jnp.zeros((batch_size, num_actions), dtype=summary.visit_probs.dtype)
@@ -2326,6 +2331,7 @@ def gumbel_muzero_policy_opt(
         final_score=full_final_score,
         final_advantages=full_advantages,
         advantages=(full_advantages/final_scale[:, None]),
+        advantage_weights=advantage_weights,
         raw_value=root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
@@ -2355,6 +2361,7 @@ def gumbel_muzero_policy_opt(
         final_score=to_argmax,
         final_advantages=final_advantages,
         advantages=(final_advantages/final_scale[:, None]),
+        advantage_weights=advantage_weights,
         raw_value= root.value,
         mixed_value=v_pi,
         sigma_v_pi=sigma_v_pi,
