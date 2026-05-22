@@ -2143,6 +2143,9 @@ def gumbel_muzero_policy_opt(
     use_opt_backward: bool = True,
     advantage_scale: float = 1.0,
     use_advantage_weights: bool = False,
+    use_puct_interior: bool = False,
+    pb_c_init: float = 1.25,
+    pb_c_base: float = 19652.0,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2232,6 +2235,10 @@ def gumbel_muzero_policy_opt(
           qtransform=qtransform,
       ),
       interior_action_selection_fn=functools.partial(
+          action_selection.muzero_action_selection,
+          pb_c_init=pb_c_init,
+          pb_c_base=pb_c_base,
+      ) if use_puct_interior else functools.partial(
           action_selection.gumbel_muzero_interior_action_selection,
           normalize_advantages=interior_fn_normalize_advantages,
           qtransform=interior_qtransform if interior_qtransform is not None else qtransform,
