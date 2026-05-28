@@ -914,7 +914,9 @@ def gumbel_muzero_policy_bfs3(
   value_scale: chex.Numeric = 0.1,
   maxvisit_init: chex.Numeric = 50.0,
   rescale_values: bool = True,
-  epsilon: chex.Numeric = 1e-8
+  epsilon: chex.Numeric = 1e-8,
+  use_bnk: bool = False,
+  num_k_actions: Optional[int] = None,
 ) -> base.PolicyOutput[None]:
   """
   Performs a 1-layer BFS:
@@ -1029,6 +1031,7 @@ def gumbel_muzero_policy_bfs3(
   #  Multiply each one-hot with its corresponding q-value
   mask_q = jax.nn.one_hot(topk_idx, num_actions)  # [B, K, A]
   root_qvalues = jnp.sum(mask_q * layer1_qvalues[:, :, None], axis=1)  # [B, A]
+  layer1_value_full = jnp.sum(mask_q * layer1_outputs.value[:, :, None], axis=1)  # [B, A]
 
   root_raw_value = root.value # [B,]
   root_prior_logits = root.prior_logits # [B, num_actions]
@@ -1076,26 +1079,46 @@ def gumbel_muzero_policy_bfs3(
   selected_action = action_selection.masked_argmax(score, combined_invalid)
 
 
-  # Compute action weights for training.
-  search_logits = root.prior_logits + final_qvalues # for debugging
-  completed_search_logits = _mask_invalid_actions(search_logits, invalid_actions)
-  action_weights = jax.nn.softmax(completed_search_logits)
+  advantages = final_qvalues
+
+  search_logits = root.prior_logits + final_qvalues
+  search_logits = _mask_invalid_actions(search_logits, invalid_actions)
+  action_weights = jax.nn.softmax(search_logits)
+
+  if use_bnk:
+    _, bnk_k_indices = jax.lax.top_k(search_logits, k=num_k_actions)           # [B, K]
+    bnk_mask = jax.nn.one_hot(bnk_k_indices, num_actions,
+                              dtype=root.prior_logits.dtype)                    # [B, K, A]
+    k_root_prior_logits = jnp.einsum('bka,ba->bk', bnk_mask, root.prior_logits)
+    k_search_logits = jnp.einsum('bka,ba->bk', bnk_mask, search_logits)
+    bnk_action_weights = jax.nn.softmax(k_search_logits)
+  else:
+    bnk_k_indices = None
+    k_root_prior_logits = None
+    k_search_logits = None
+    bnk_action_weights = None
+
   return base.PolicyOutput(
       action=selected_action,
       action_weights=action_weights,
       search_logits=search_logits,
       children_values=root_qvalues,
+      visit_counts=root_children_visit_counts,
       root_gumbel=root_gumbel,
       root_prior_logits=root.prior_logits,
+      layer1_value=layer1_value_full,
       final_qvalues=final_qvalues,
       final_score=score,
-      # bfs2 debugging
-      rescaled_qvalues=rescaled_qvalues1,
-      rescaled_qvalues2=rescaled_qvalues2,
-      visit_counts=root_children_visit_counts,
+      advantages=advantages,
       raw_value=raw_value,
       mixed_value=mixed_value,
       maxvisit=maxvisit,
+      rescaled_qvalues=rescaled_qvalues1,
+      rescaled_qvalues2=rescaled_qvalues2,
+      bnk_k_indices=bnk_k_indices,
+      k_root_prior_logits=k_root_prior_logits,
+      k_search_logits=k_search_logits,
+      bnk_action_weights=bnk_action_weights,
   )
 
 
