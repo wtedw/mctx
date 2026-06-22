@@ -202,6 +202,32 @@ def qtransform_by_parent_and_siblings(
   chex.assert_equal_shape([normalized, qvalues])
   return normalized
 
+
+def qtransform_identity(
+    tree: tree_lib.Tree,
+    node_index: chex.Numeric,
+) -> chex.Array:
+  """Returns raw Q-values without rescaling — original AlphaZero semantics.
+
+  Unlike `qtransform_by_parent_and_siblings`, this applies no min-max
+  normalization, so the Q-values are fed into the PUCT formula on their native
+  scale (e.g. `[-1, 1]` value heads). Unvisited actions take Q = 0, matching
+  AlphaZero's neutral first-play-urgency.
+
+  Args:
+    tree: _unbatched_ MCTS tree state.
+    node_index: scalar index of the parent node.
+
+  Returns:
+    Raw Q-values, with zero for unvisited actions. Shape `[num_actions]`.
+  """
+  chex.assert_shape(node_index, ())
+  qvalues = tree.qvalues(node_index)
+  visit_counts = tree.children_visits[node_index]
+  chex.assert_rank([qvalues, visit_counts, node_index], [1, 1, 0])
+  return jnp.where(visit_counts > 0, qvalues, 0.0)
+
+
 def qtransform_completed_by_mix_value(
     tree: tree_lib.Tree,
     node_index: chex.Numeric,

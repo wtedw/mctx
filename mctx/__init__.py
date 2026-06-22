@@ -39,11 +39,13 @@ from mctx._src.policies import gumbel_muzero_policy_bnk
 from mctx._src.policies import gumbel_muzero_policy_opt
 from mctx._src.policies import muzero_policy
 from mctx._src.policies import alphazero_policy
+from mctx._src.policies import alphazero_policy_opt
 from mctx._src.policies import persistent_search_step
 from mctx._src.policies import stochastic_muzero_policy
 from mctx._src.qtransforms import qtransform_by_min_max
 from mctx._src.qtransforms import qtransform_by_parent_and_siblings
 from mctx._src.qtransforms import qtransform_completed_by_mix_value
+from mctx._src.qtransforms import qtransform_identity
 
 from mctx._src.search import search
 from mctx._src.search import search_to_target
@@ -82,11 +84,13 @@ __all__ = (
     "muzero_action_selection",
     "muzero_policy",
     "alphazero_policy",
+    "alphazero_policy_opt",
     "persistent_search_step",
     "get_subtree",
     "qtransform_by_min_max",
     "qtransform_by_parent_and_siblings",
     "qtransform_completed_by_mix_value",
+    "qtransform_identity",
 
     "search",
     "search_to_target",

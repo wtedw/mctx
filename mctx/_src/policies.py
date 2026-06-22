@@ -2524,6 +2524,136 @@ def gumbel_muzero_policy_opt(
         k_search_logits=k_search_logits,
     )
 
+
+def alphazero_policy_opt(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    num_k_actions: int,
+    num_simulations: int,
+    invalid_actions: Optional[chex.Array] = None,
+    max_depth: Optional[int] = None,
+    *,
+    qtransform: base.QTransform = qtransforms.qtransform_by_parent_and_siblings,
+    dirichlet_fraction: chex.Numeric = 0.25,
+    dirichlet_alpha: chex.Numeric = 0.3,
+    pb_c_init: chex.Numeric = 1.25,
+    pb_c_base: chex.Numeric = 19652,
+    temperature: chex.Numeric = 1.0,
+    use_opt_backward: bool = True,
+    return_search_tree: bool = False,
+) -> base.PolicyOutput[None]:
+  """AlphaZero PUCT search running on the optimized `search_opt` backend.
+
+  Same algorithm as `alphazero_policy` (PUCT selection at root and interior
+  nodes, Dirichlet root noise, visit-count action sampling), but driven by
+  `search_opt.search_opt`: a `jax.lax.scan` over `num_simulations` with the
+  TPU-friendly memoized backward pass. Search is restricted to the top
+  `num_k_actions` actions under the (noisy) root prior, mirroring the BNK/opt
+  policies. Unlike `alphazero_policy`, this allocates a fresh tree each call and
+  does *not* support subtree reuse (`get_subtree` / `persistent_search_step`).
+
+  In the shape descriptions, `B` denotes the batch dimension, `A` the full
+  action space, and `K == num_k_actions` the reduced action space.
+
+  Args:
+    params: params forwarded to the recurrent function.
+    rng_key: random number generator state, consumed.
+    root: a `(prior_logits, value, embedding)` `RootFnOutput`, with
+      `prior_logits` of shape `[B, A]`.
+    recurrent_fn: leaf-evaluation callable, as in `muzero_policy`. It returns
+      full `[B, A]` prior logits; `search_opt` reduces them to the top
+      `num_k_actions` internally.
+    num_k_actions: the number of top actions retained for the search at each
+      node (the reduced action space `K`).
+    num_simulations: the number of simulations.
+    invalid_actions: `[B, A]` invalid-action mask (ones for invalid).
+    max_depth: maximum search tree depth.
+    qtransform: Q-value transform for PUCT. Use `qtransform_identity` for the
+      original AlphaZero (raw, un-rescaled Q-values).
+    dirichlet_fraction: weight of the Dirichlet noise added to the root prior.
+    dirichlet_alpha: concentration parameter of the Dirichlet distribution.
+    pb_c_init: constant c_1 in the PUCT formula.
+    pb_c_base: constant c_2 in the PUCT formula.
+    temperature: temperature for sampling proportionally to visit counts.
+    use_opt_backward: use the memoized `backward_opt` instead of the reference
+      `backward`.
+    return_search_tree: if True, include the search tree in the output.
+
+  Returns:
+    `PolicyOutput` with the proposed action and `[B, A]` action weights.
+  """
+  batch_size, num_actions = root.prior_logits.shape
+  rng_key, dirichlet_rng_key, search_rng_key = jax.random.split(rng_key, 3)
+
+  # Add Dirichlet noise to the root prior (fresh-root exploration), then mask.
+  noisy_logits = _get_logits_from_probs(
+      _add_dirichlet_noise(
+          dirichlet_rng_key,
+          jax.nn.softmax(root.prior_logits),
+          dirichlet_fraction=dirichlet_fraction,
+          dirichlet_alpha=dirichlet_alpha))
+  noisy_logits = _mask_invalid_actions(noisy_logits, invalid_actions)
+
+  # Reduce to the top-`num_k_actions` actions under the noisy prior.
+  _, k_indices = jax.lax.top_k(noisy_logits, k=num_k_actions)  # [B, K]
+  k_prior_logits = jnp.take_along_axis(noisy_logits, k_indices, axis=-1)  # [B, K]
+  if invalid_actions is None:
+    k_invalid_actions = None
+  else:
+    k_invalid_actions = jnp.take_along_axis(invalid_actions, k_indices, axis=-1)
+  k_masked_prior_logits = _mask_invalid_actions(k_prior_logits, k_invalid_actions)
+
+  root = root.replace(
+      prior_logits=k_masked_prior_logits,
+      k_indices=k_indices)
+
+  # PUCT for both root (depth==0) and interior nodes.
+  interior_action_selection_fn = functools.partial(
+      action_selection.muzero_action_selection,
+      pb_c_base=pb_c_base,
+      pb_c_init=pb_c_init,
+      qtransform=qtransform)
+  root_action_selection_fn = functools.partial(
+      interior_action_selection_fn, depth=0)
+
+  search_tree = search_opt.search_opt(
+      params=params,
+      rng_key=search_rng_key,
+      root=root,
+      recurrent_fn=recurrent_fn,
+      root_action_selection_fn=root_action_selection_fn,
+      interior_action_selection_fn=interior_action_selection_fn,
+      num_k_actions=num_k_actions,
+      num_simulations=num_simulations,
+      max_depth=max_depth,
+      invalid_actions=k_invalid_actions,
+      extra_data=None,
+      use_opt_backward=use_opt_backward)
+
+  summary = search_tree.summary(include_metrics=False)  # over the K actions
+
+  # Sample proportionally to visit counts over the K survivors, then map back.
+  batch_range = jnp.arange(batch_size)
+  k_action_weights = summary.visit_probs  # [B, K]
+  action_logits = _apply_temperature(
+      _get_logits_from_probs(k_action_weights), temperature)
+  k_action = jax.random.categorical(rng_key, action_logits)  # [B]
+  action = k_indices[batch_range, k_action]
+
+  # Scatter the K visit probs back into the full action space.
+  batch_idx = batch_range[:, None]  # [B, 1] broadcast to [B, K]
+  action_weights = jnp.zeros(
+      (batch_size, num_actions), dtype=k_action_weights.dtype)
+  action_weights = action_weights.at[batch_idx, k_indices].set(k_action_weights)
+
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+      search_tree=search_tree if return_search_tree else None)
+
+
 def stochastic_muzero_policy(
     params: chex.ArrayTree,
     rng_key: chex.PRNGKey,
