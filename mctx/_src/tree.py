@@ -237,3 +237,122 @@ def _unbatched_qvalues(tree: Tree, index: int) -> int:
       tree.children_rewards[index]
       + tree.children_discounts[index] * tree.children_values[index]
   )
+
+
+# =============================================================================
+# Subtree persistence (search-tree reuse across sequential moves).
+#
+# Ported from github.com/lowrollr/mctx-az. After committing to an action, the
+# subtree rooted at the corresponding child becomes the new root, so the work
+# already done inside it (visit counts, values, expanded nodes, embeddings) is
+# carried into the next search instead of being recomputed.
+#
+# All ops are JIT/vmap-friendly: subtree membership comes from iterative label
+# propagation, slot compaction from a cumsum, and pointer rewriting from a
+# single gather/scatter through a `translation` array -- no Python-level tree
+# walking and no dynamic shapes.
+# =============================================================================
+
+
+def _get_translation(tree: Tree, child_index: chex.Array):
+  """Builds the old->new slot remapping for the subtree under `child_index`.
+
+  Operates on a single (unbatched) tree. Returns `(old_idxs, translation,
+  erase_idxs)` where, for every old slot `i`:
+    * `old_idxs[i]`   = `i` if slot `i` is retained else 0,
+    * `translation[i]`= the new (compacted) slot for `i`, or `UNVISITED`,
+    * `erase_idxs[i]` = True if new slot `i` must be blanked out.
+  """
+  num_nodes = tree.node_visits.shape[-1]  # N
+  slots = jnp.arange(num_nodes)
+
+  # Label every node with the root-child subtree it descends from. Seed each
+  # node with its own index, then repeatedly pull the label from the parent.
+  # The root (parent == NO_PARENT) and the root's direct children are the fixed
+  # points seeding each label; the `> 0` guard stops the root (label 0) from
+  # overwriting anyone.
+  subtrees = jnp.arange(num_nodes)
+
+  def propagate_fun(_, subtrees):
+    parents_subtrees = jnp.where(
+        tree.parents != tree.NO_PARENT, subtrees[tree.parents], 0)
+    return jnp.where(parents_subtrees > 0, parents_subtrees, subtrees)
+
+  subtrees = jax.lax.fori_loop(0, num_nodes, propagate_fun, subtrees)
+
+  # Select the subtree we moved into, then compact retained slots to 0..k-1 via
+  # a cumsum (parallel stream-compaction). Original allocation order is kept, so
+  # the chosen child -- the smallest retained index -- lands at new slot 0.
+  subtree_master_idx = tree.children_index[tree.ROOT_INDEX, child_index]
+  nodes_to_retain = subtrees == subtree_master_idx
+  old_idxs = nodes_to_retain * slots
+  cumsum = jnp.cumsum(nodes_to_retain)
+  new_next_node_index = cumsum[-1]
+  translation = jnp.where(nodes_to_retain, cumsum - 1, tree.UNVISITED)
+  erase_idxs = slots >= new_next_node_index
+  return old_idxs, translation, erase_idxs
+
+
+@jax.vmap
+def get_subtree(tree: Tree, child_index: chex.Array) -> Tree:
+  """Extracts the subtree rooted at root-child `child_index`, per batch element.
+
+  The returned tree has the chosen child compacted to `ROOT_INDEX` (slot 0),
+  all descendants renumbered contiguously, and every freed slot blanked. Pass
+  it to `alphazero_policy(..., tree=<this>)` to continue search from it.
+
+  Args:
+    tree: a batched `Tree` (vmapped over the leading batch axis).
+    child_index: `[B]` the action taken at the root of each tree.
+
+  Returns:
+    The resliced batched `Tree`.
+  """
+  old_idxs, translation, erase_idxs = _get_translation(tree, child_index)
+
+  def translate(x, null_value=0):
+    # Move plain per-node data from old slots to new slots, blank the tail.
+    return jnp.where(
+        erase_idxs.reshape((-1,) + (1,) * (x.ndim - 1)),
+        jnp.full_like(x, null_value),
+        x.at[translation].set(x[old_idxs]),
+    )
+
+  def translate_idx(x, null_value=tree.UNVISITED):
+    # Like `translate`, but the entries are themselves node indices, so the
+    # value must also be rewritten through `translation` (sentinels untouched).
+    return jnp.where(
+        erase_idxs.reshape((-1,) + (1,) * (x.ndim - 1)),
+        jnp.full_like(x, null_value),
+        x.at[translation].set(
+            jnp.where(x == null_value, null_value, translation[x])),
+    )
+
+  def translate_pytree(x, null_value=0):
+    return jax.tree.map(lambda t: translate(t, null_value=null_value), x)
+
+  # node_depths: retained nodes shift up by one level (chosen child was at
+  # depth 1 and becomes the new root at depth 0).
+  new_depths = translate(tree.node_depths)
+  new_depths = jnp.where(erase_idxs, 0, jnp.maximum(new_depths - 1, 0))
+
+  return tree.replace(
+      node_visits=translate(tree.node_visits),
+      raw_values=translate(tree.raw_values),
+      node_values=translate(tree.node_values),
+      node_depths=new_depths,
+      parents=translate_idx(tree.parents, null_value=tree.NO_PARENT),
+      action_from_parent=translate(
+          tree.action_from_parent,
+          null_value=tree.NO_PARENT).at[tree.ROOT_INDEX].set(tree.NO_PARENT),
+      children_index=translate_idx(tree.children_index),
+      children_prior_logits=translate(tree.children_prior_logits),
+      children_visits=translate(tree.children_visits),
+      children_rewards=translate(tree.children_rewards),
+      children_discounts=translate(tree.children_discounts),
+      children_values=translate(tree.children_values),
+      embeddings=translate_pytree(tree.embeddings),
+      # A fresh root has no externally-supplied invalid-action mask; the stored
+      # priors already encode masking from when the child was expanded.
+      root_invalid_actions=jnp.zeros_like(tree.root_invalid_actions),
+  )

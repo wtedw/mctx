@@ -356,6 +356,85 @@ class PoliciesTest(absltest.TestCase):
     np.testing.assert_allclose(stochastic_policy_output.action_weights,
                                policy_output.action_weights)
 
+  def test_subtree_reuse_flow(self):
+    """End-to-end subtree reuse: alphazero_policy -> get_subtree -> topup."""
+    batch_size, num_actions, embed_dim = 3, 6, 8
+    num_simulations = 16
+    max_nodes = 32
+
+    def recurrent_fn(params, rng_key, action, embedding):
+      del params, rng_key
+      # Deterministic toy dynamics with a non-trivial embedding, so node
+      # embeddings/depths must be translated by get_subtree.
+      new_embedding = embedding + jax.nn.one_hot(action, embed_dim)
+      output = mctx.RecurrentFnOutput(
+          reward=jnp.zeros_like(embedding[:, 0]),
+          discount=jnp.full_like(embedding[:, 0], 0.99),
+          prior_logits=new_embedding[:, :num_actions],
+          value=jnp.mean(new_embedding, axis=-1))
+      return output, new_embedding
+
+    key = jax.random.PRNGKey(0)
+    key, root_key, search_key = jax.random.split(key, 3)
+    root = mctx.RootFnOutput(
+        prior_logits=jax.random.normal(root_key, (batch_size, num_actions)),
+        value=jnp.zeros((batch_size,)),
+        embedding=jax.random.normal(root_key, (batch_size, embed_dim)))
+
+    # ---- First move: fresh search seeds a reusable tree. ----
+    out = mctx.alphazero_policy(
+        params=(), rng_key=search_key, root=root, recurrent_fn=recurrent_fn,
+        num_simulations=num_simulations, max_nodes=max_nodes,
+        dirichlet_fraction=0.0)
+    tree = out.search_tree
+    # One scratch slot is reserved on top of `max_nodes` usable nodes.
+    self.assertEqual(tree.node_visits.shape, (batch_size, max_nodes + 1))
+    self.assertTrue(
+        bool(jnp.all(tree.node_visits[:, 0] >= num_simulations)))
+    np.testing.assert_allclose(out.action_weights.sum(axis=-1), 1.0, atol=1e-5)
+
+    # ---- get_subtree reslices to the chosen child. ----
+    batch_range = jnp.arange(batch_size)
+    old_child = tree.children_index[batch_range, mctx.Tree.ROOT_INDEX,
+                                    out.action]
+    old_child_visits = tree.node_visits[batch_range, old_child]
+    sub = mctx.get_subtree(tree, out.action)
+    # New root inherits the chosen child's visit count, with reset bookkeeping.
+    np.testing.assert_array_equal(
+        np.asarray(sub.node_visits[:, 0]), np.asarray(old_child_visits))
+    np.testing.assert_array_equal(
+        np.asarray(sub.parents[:, 0]),
+        np.full((batch_size,), mctx.Tree.NO_PARENT))
+    np.testing.assert_array_equal(
+        np.asarray(sub.node_depths[:, 0]), np.zeros((batch_size,)))
+    self.assertEqual(sub.node_visits.shape, tree.node_visits.shape)
+    # Child pointers stay within bounds after renumbering.
+    self.assertTrue(bool(jnp.all(sub.children_index < sub.node_visits.shape[1])))
+    self.assertTrue(bool(jnp.all(sub.children_index >= mctx.Tree.UNVISITED)))
+
+    # ---- persistent_search_step tops every reused row back up to N. ----
+    key, step_key = jax.random.split(key)
+    out2 = mctx.persistent_search_step(
+        params=(), rng_key=step_key, recurrent_fn=recurrent_fn,
+        num_simulations=num_simulations, trees=sub)
+    tree2 = out2.search_tree
+    self.assertTrue(
+        bool(jnp.all(tree2.node_visits[:, 0] >= num_simulations)))
+    np.testing.assert_array_equal(
+        np.asarray(tree2.parents[:, 0]),
+        np.full((batch_size,), mctx.Tree.NO_PARENT))
+    np.testing.assert_allclose(out2.action_weights.sum(axis=-1), 1.0, atol=1e-5)
+
+    # ---- The whole reuse step is jittable. ----
+    jitted_step = jax.jit(functools.partial(
+        mctx.persistent_search_step, params=(), recurrent_fn=recurrent_fn,
+        num_simulations=num_simulations))
+    key, jit_key = jax.random.split(key)
+    out3 = jitted_step(rng_key=jit_key, trees=mctx.get_subtree(tree2,
+                                                               out2.action))
+    self.assertTrue(
+        bool(jnp.all(out3.search_tree.node_visits[:, 0] >= num_simulations)))
+
 
 if __name__ == "__main__":
   absltest.main()

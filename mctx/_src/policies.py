@@ -124,6 +124,166 @@ def muzero_policy(
       action_weights=action_weights,
       search_tree=search_tree)
 
+
+def alphazero_policy(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    root: base.RootFnOutput,
+    recurrent_fn: base.RecurrentFn,
+    num_simulations: int,
+    invalid_actions: Optional[chex.Array] = None,
+    max_depth: Optional[int] = None,
+    *,
+    max_nodes: Optional[int] = None,
+    qtransform: base.QTransform = qtransforms.qtransform_by_parent_and_siblings,
+    dirichlet_fraction: chex.Numeric = 0.25,
+    dirichlet_alpha: chex.Numeric = 0.3,
+    pb_c_init: chex.Numeric = 1.25,
+    pb_c_base: chex.Numeric = 19652,
+    temperature: chex.Numeric = 1.0) -> base.PolicyOutput[None]:
+  """Fresh MuZero/AlphaZero PUCT search, seeding a reusable tree.
+
+  Use this for the first move; on subsequent moves reuse the search tree via
+  `get_subtree` + `persistent_search_step`:
+
+    out   = alphazero_policy(..., root=root0, max_nodes=N)   # first move
+    trees = mctx.get_subtree(out.search_tree, out.action)
+    out   = mctx.persistent_search_step(..., trees=trees)    # later moves
+
+  The tree reserves one extra storage slot as overflow scratch, matching what
+  `persistent_search_step` expects, so the output can be fed straight back
+  through `get_subtree`.
+
+  Args:
+    params: params forwarded to the recurrent function.
+    rng_key: random number generator state, consumed.
+    root: a `RootFnOutput`.
+    recurrent_fn: leaf-evaluation callable, as in `muzero_policy`.
+    num_simulations: target root visit budget for the search.
+    invalid_actions: `[B, num_actions]` invalid-action mask.
+    max_depth: maximum search tree depth.
+    max_nodes: storage capacity (number of usable nodes); defaults to
+      `num_simulations`. One extra slot is reserved internally as scratch.
+    qtransform, dirichlet_*, pb_c_*, temperature: as in `muzero_policy`.
+
+  Returns:
+    `PolicyOutput` with the proposed action, action weights, and the search tree
+    (suitable for passing back through `get_subtree` for the next move).
+  """
+  rng_key, dirichlet_rng_key, search_rng_key = jax.random.split(rng_key, 3)
+
+  # Add Dirichlet noise to the root prior (fresh-root exploration).
+  noisy_logits = _get_logits_from_probs(
+      _add_dirichlet_noise(
+          dirichlet_rng_key,
+          jax.nn.softmax(root.prior_logits),
+          dirichlet_fraction=dirichlet_fraction,
+          dirichlet_alpha=dirichlet_alpha))
+  root = root.replace(
+      prior_logits=_mask_invalid_actions(noisy_logits, invalid_actions))
+  if invalid_actions is None:
+    invalid_actions = jnp.zeros_like(root.prior_logits)
+  # Reserve one extra slot for overflow scratch (capacity == max_nodes).
+  capacity = num_simulations if max_nodes is None else max_nodes
+  search_input_tree = search.instantiate_tree_from_root(
+      root, capacity, root_invalid_actions=invalid_actions, extra_data=None)
+
+  interior_action_selection_fn = functools.partial(
+      action_selection.muzero_action_selection,
+      pb_c_base=pb_c_base,
+      pb_c_init=pb_c_init,
+      qtransform=qtransform)
+  root_action_selection_fn = functools.partial(
+      interior_action_selection_fn, depth=0)
+
+  batch_size = root.value.shape[0]
+  search_tree = search.search_to_target(
+      params, search_rng_key, search_input_tree,
+      target_visits=num_simulations,
+      active_mask=jnp.ones((batch_size,), dtype=bool),
+      recurrent_fn=recurrent_fn,
+      root_action_selection_fn=root_action_selection_fn,
+      interior_action_selection_fn=interior_action_selection_fn,
+      max_depth=max_depth,
+      max_iters=num_simulations)
+
+  summary = search_tree.summary()
+  action_weights = summary.visit_probs
+  action_logits = _apply_temperature(
+      _get_logits_from_probs(action_weights), temperature)
+  action = jax.random.categorical(rng_key, action_logits)
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+      search_tree=search_tree)
+
+
+def persistent_search_step(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    recurrent_fn: base.RecurrentFn,
+    num_simulations: int,
+    trees: search.Tree,
+    max_depth: Optional[int] = None,
+    max_iters: Optional[int] = None,
+    *,
+    qtransform: base.QTransform = qtransforms.qtransform_by_parent_and_siblings,
+    pb_c_init: chex.Numeric = 1.25,
+    pb_c_base: chex.Numeric = 19652,
+    temperature: chex.Numeric = 1.0) -> base.PolicyOutput[None]:
+  """Tops up reused trees to `num_simulations` root visits, then picks an action.
+
+  For evaluation with subtree reuse: every row carries a subtree from the
+  previous move (via `get_subtree`), so it only needs `num_simulations - X` new
+  simulations, where `X` is whatever it inherited. This runs a single dynamic
+  `while_loop` (`search.search_to_target`) that advances each row only until it
+  reaches the target and then no-ops it -- so each row does exactly its own
+  `num_simulations - X` sims with no fixed per-move count. The only static part
+  is the `[B, N]` tree shape; the loop length is data-dependent.
+
+  Args:
+    params: params forwarded to `recurrent_fn`.
+    rng_key: rng state, consumed.
+    recurrent_fn: leaf-evaluation callable.
+    num_simulations: target root visit count for every row.
+    trees: full-`B` persisted `Tree`, already resliced via `get_subtree`.
+    max_depth: maximum search tree depth.
+    max_iters: hard cap on `while_loop` iterations (safety bound); defaults to
+      the tree's storage capacity.
+    qtransform, pb_c_*, temperature: as in `alphazero_policy`.
+
+  Returns:
+    A full-`B` `PolicyOutput`; feed `search_tree` back through `get_subtree`.
+  """
+  batch_size = trees.node_visits.shape[0]
+  rng_key, search_rng_key, sample_key = jax.random.split(rng_key, 3)
+
+  interior_action_selection_fn = functools.partial(
+      action_selection.muzero_action_selection,
+      pb_c_base=pb_c_base, pb_c_init=pb_c_init, qtransform=qtransform)
+  root_action_selection_fn = functools.partial(
+      interior_action_selection_fn, depth=0)
+
+  search_tree = search.search_to_target(
+      params, search_rng_key, trees,
+      target_visits=num_simulations,
+      active_mask=jnp.ones((batch_size,), dtype=bool),
+      recurrent_fn=recurrent_fn,
+      root_action_selection_fn=root_action_selection_fn,
+      interior_action_selection_fn=interior_action_selection_fn,
+      max_depth=max_depth,
+      max_iters=max_iters)
+
+  summary = search_tree.summary()
+  action_weights = summary.visit_probs
+  action_logits = _apply_temperature(
+      _get_logits_from_probs(action_weights), temperature)
+  action = jax.random.categorical(sample_key, action_logits)
+  return base.PolicyOutput(
+      action=action,
+      action_weights=action_weights,
+      search_tree=search_tree)
+
 # [original]
 
 # def gumbel_muzero_policy_sh2(

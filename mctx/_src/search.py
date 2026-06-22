@@ -111,6 +111,132 @@ def search(
   new_tree = run_loop_donate(rng_key, tree)
   return new_tree
 
+def _tree_select(mask: chex.Array, tree_old: Tree, tree_new: Tree) -> Tree:
+  """Per-batch select between two trees: keep `tree_old` where `mask` is True.
+
+  `mask` has shape `[B]`; it is broadcast over each leaf's trailing dims. Used
+  to make an over-full simulation a true no-op for the affected batch elements.
+  """
+  def sel(a, b):
+    m = mask.reshape((mask.shape[0],) + (1,) * (a.ndim - 1))
+    return jnp.where(m, a, b)
+  return jax.tree.map(sel, tree_old, tree_new)
+
+
+def search_to_target(
+    params: base.Params,
+    rng_key: chex.PRNGKey,
+    tree: Tree,
+    target_visits: chex.Numeric,
+    active_mask: chex.Array,
+    *,
+    recurrent_fn: base.RecurrentFn,
+    root_action_selection_fn: base.RootActionSelectionFn,
+    interior_action_selection_fn: base.InteriorActionSelectionFn,
+    max_depth: Optional[int] = None,
+    max_iters: Optional[int] = None,
+) -> Tree:
+  """Tops up the `active_mask` rows until their root reaches `target_visits`.
+
+  Phase-1 kernel for batched subtree reuse: warm-started rows only need a few
+  new simulations to reach the per-move budget, so instead of a fixed loop this
+  runs a *dynamic* `while_loop` that stops as soon as every active row has hit
+  its target. The per-move top-up count therefore varies with how much was
+  inherited, with no recompilation.
+
+  Each iteration runs a batched sim/expand/backward, but a row advances only if
+  it is active, below `target_visits`, and has room (`< capacity`); every other
+  row -- including all non-active (e.g. terminated) rows -- is a true no-op.
+  Non-active rows are never touched and can be searched separately at a smaller
+  batch size.
+
+  Args:
+    params: params forwarded to `recurrent_fn`.
+    rng_key: rng state, consumed.
+    tree: pre-populated batched `Tree` to continue from.
+    target_visits: scalar (or `[B]`) target root visit count per row.
+    active_mask: `[B]` bool; only these rows are advanced / gate termination.
+    recurrent_fn, *_action_selection_fn: as in `search`.
+    max_depth: maximum tree depth during simulation. Defaults to `num_nodes`.
+    max_iters: hard cap on iterations (also the static loop bound). Defaults to
+      the storage capacity, which bounds how many root visits a row can gain.
+
+  Returns:
+    The updated batched `Tree`.
+  """
+  action_selection_fn = action_selection.switching_action_selection_wrapper(
+      root_action_selection_fn=root_action_selection_fn,
+      interior_action_selection_fn=interior_action_selection_fn,
+  )
+
+  batch_size = tree.node_visits.shape[0]
+  batch_range = jnp.arange(batch_size)
+  num_nodes = tree.node_visits.shape[1]
+  capacity = num_nodes - 1      # last slot is overflow scratch
+  scratch_index = num_nodes - 1
+  if max_depth is None:
+    max_depth = num_nodes
+  if max_iters is None:
+    max_iters = capacity
+
+  target = jnp.asarray(target_visits)
+  active = active_mask
+  next_free0 = jnp.sum(
+      tree.node_visits[:, :capacity] > 0, axis=1).astype(jnp.int32)
+
+  def _below_target(tree):
+    return tree.node_visits[:, Tree.ROOT_INDEX] < target
+
+  def cond_fun(carry):
+    i, _, tree, _ = carry
+    not_done = jnp.logical_and(active, _below_target(tree))
+    return jnp.logical_and(i < max_iters, jnp.any(not_done))
+
+  def body_fun(carry):
+    i, key, tree, next_free = carry
+    key, simulate_key, expand_key = jax.random.split(key, 3)
+    simulate_keys = jax.random.split(simulate_key, batch_size)
+
+    parent_index, action = simulate(
+        simulate_keys, tree, action_selection_fn, max_depth)
+
+    child = tree.children_index[batch_range, parent_index, action]
+    is_unvisited = child == Tree.UNVISITED
+    no_room = next_free >= capacity
+    # A row does real work only while it is active and still below target.
+    should = jnp.logical_and(active, _below_target(tree))
+
+    write_index = jnp.where(
+        is_unvisited,
+        jnp.where(no_room, scratch_index, next_free),
+        child)
+
+    tree_new = expand(
+        params, expand_key, tree, recurrent_fn,
+        parent_index, action, write_index)
+    tree_new = backward(tree_new, write_index)
+
+    # Keep the new tree only where the row should advance and isn't over-full;
+    # everything else (idle, done, terminated, overflow) is left unchanged.
+    overflow = jnp.logical_and(is_unvisited, no_room)
+    do_work = jnp.logical_and(should, jnp.logical_not(overflow))
+    tree = _tree_select(jnp.logical_not(do_work), tree, tree_new)
+
+    created = jnp.logical_and(should, jnp.logical_and(
+        is_unvisited, jnp.logical_not(no_room)))
+    next_free = next_free + created.astype(jnp.int32)
+
+    return (i + 1, key, tree, next_free)
+
+  def run_loop(rng_key, tree):
+    init = (jnp.array(0, dtype=jnp.int32), rng_key, tree, next_free0)
+    _, _, tree, _ = jax.lax.while_loop(cond_fun, body_fun, init)
+    return tree
+
+  run_loop_donate = jax.jit(run_loop, donate_argnums=(1,))
+  return run_loop_donate(rng_key, tree)
+
+
 class _SimulationState(NamedTuple):
   """The state for the simulation while loop."""
   rng_key: chex.PRNGKey
