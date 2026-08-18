@@ -2299,6 +2299,8 @@ def gumbel_muzero_policy_opt(
     use_puct_interior: bool = False,
     pb_c_init: float = 1.25,
     pb_c_base: float = 19652.0,
+    use_opt_replay_actions: bool = False,
+    embedding_step_fn: Optional[base.EmbeddingStepFn] = None,
 ) -> base.PolicyOutput[action_selection.GumbelMuZeroExtraData]:
   """Runs Gumbel MuZero search and returns the `PolicyOutput`.
 
@@ -2340,6 +2342,11 @@ def gumbel_muzero_policy_opt(
       games can use gumbel_scale=0.0.
     rehydrate_fields: Boolean for whether to fill in the n_actions array
       fields of PolicyOutput instead of returning k sized arrays
+    use_opt_replay_actions: whether to reconstruct parent embeddings by
+      replaying real actions during optimized simulation.
+    embedding_step_fn: unbatched deterministic transition callable with
+      signature `(action, embedding) -> embedding`. Required when
+      `use_opt_replay_actions` is True.
 
   Returns:
     `PolicyOutput` containing the proposed action, action_weights and the used
@@ -2401,7 +2408,9 @@ def gumbel_muzero_policy_opt(
       max_depth=max_depth,
       invalid_actions=k_invalid_actions,
       extra_data=extra_data,
-      use_opt_backward=use_opt_backward
+      use_opt_backward=use_opt_backward,
+      use_opt_replay_actions=use_opt_replay_actions,
+      embedding_step_fn=embedding_step_fn,
   )
   summary = search_tree.summary(include_metrics=return_summary)
 

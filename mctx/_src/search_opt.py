@@ -42,8 +42,15 @@ def search_opt(
     invalid_actions: Optional[chex.Array] = None,
     extra_data: Any = None,
     use_opt_backward: bool = True,
+    use_opt_replay_actions: bool = False,
+    embedding_step_fn: Optional[base.EmbeddingStepFn] = None,
 ) -> Tree:
   """Performs a full search and returns sampled actions (while_loop version)."""
+
+  if use_opt_replay_actions and embedding_step_fn is None:
+    raise ValueError(
+        "embedding_step_fn must be provided when "
+        "use_opt_replay_actions=True")
 
   # Build the (root/interior) action selector once; it’s loop-invariant.
   action_selection_fn = action_selection.switching_action_selection_wrapper(
@@ -78,22 +85,30 @@ def search_opt(
     simulate_keys = jax.random.split(simulate_key, batch_size)
 
     with jax.named_scope("opt_simulate"):
-      parent_index, k_action, path_memo, path_depth = simulate(
-          simulate_keys, tree, action_selection_fn, max_depth
-      )
+      if use_opt_replay_actions:
+        (parent_index, k_action, path_memo, path_depth,
+         parent_embedding) = simulate_replay(
+             simulate_keys, tree, action_selection_fn, max_depth,
+             embedding_step_fn)
+      else:
+        parent_index, k_action, path_memo, path_depth = simulate(
+            simulate_keys, tree, action_selection_fn, max_depth)
+        parent_embedding = None
 
     # Node created at sim i will have index i+1; 0 is root.
     next_node_index = tree.children_index[batch_range, parent_index, k_action]
     next_node_index = jnp.where(
         next_node_index == Tree.UNVISITED, i + 1, next_node_index
     )
-    action = tree.children_k_indices[batch_range, parent_index, k_action]
+    action = tree.children_k_indices[
+        batch_range, parent_index, k_action].astype(jnp.int32)
 
     # Expand the chosen leaf; recurrent_fn uses params and expand_key.
     with jax.named_scope("opt_expand"):
       tree, leaf_memo = expand(
-          params, expand_key, tree, recurrent_fn, parent_index, action, k_action, next_node_index, num_k_actions
-      )
+          params, expand_key, tree, recurrent_fn, parent_index, action,
+          k_action, next_node_index, num_k_actions,
+          parent_embedding=parent_embedding)
 
     # Backpropagate value/visits.
     with jax.named_scope("opt_backward"):
@@ -148,6 +163,18 @@ class _SimulationState(NamedTuple):
   # path_children_values: list[float]
   # path_children_rewards: list[float]
   # path_children_discounts: list[float]
+
+
+class _ReplaySimulationState(NamedTuple):
+  """Simulation state carrying an embedding replayed from the root."""
+  rng_key: chex.PRNGKey
+  node_index: int
+  action: int
+  next_node_index: int
+  depth: int
+  is_continuing: bool
+  embedding: base.RecurrentState
+  path_memo: _PathMemo
 
 # class _SimulateMemo(NamedTuple):
 #   """Memoization structure for simulate function."""
@@ -278,6 +305,100 @@ def simulate(
   # return end_state.node_index, end_state.action
 
 
+@functools.partial(jax.vmap, in_axes=[0, 0, None, None, None], out_axes=0)
+def simulate_replay(
+    rng_key: chex.PRNGKey,
+    tree: Tree,
+    action_selection_fn: base.InteriorActionSelectionFn,
+    max_depth: int,
+    embedding_step_fn: base.EmbeddingStepFn,
+) -> Tuple[chex.Array, chex.Array, _PathMemo, chex.Array,
+           base.RecurrentState]:
+  """Traverses a tree while reconstructing embeddings from real actions.
+
+  The replay callback is applied only to already-expanded edges that the
+  simulation follows. The final selected edge is evaluated once by `expand`.
+  """
+
+  def cond_fun(state):
+    return state.is_continuing
+
+  def body_fun(state):
+    with jax.named_scope("osim_replay_prep"):
+      node_index = state.next_node_index
+      rng_key, action_selection_key = jax.random.split(state.rng_key)
+      k_action = action_selection_fn(
+          action_selection_key, tree, node_index, state.depth)
+      action = tree.children_k_indices[node_index, k_action].astype(jnp.int32)
+      next_node_index = tree.children_index[node_index, k_action]
+
+    with jax.named_scope("osim_replay_scatter_memo"):
+      path_memo = _PathMemo(
+          parent=state.path_memo.parent.at[state.depth].set(node_index),
+          action=state.path_memo.action.at[state.depth].set(k_action),
+          node_values=state.path_memo.node_values.at[state.depth].set(
+              tree.node_values[node_index]),
+          node_visits=state.path_memo.node_visits.at[state.depth].set(
+              tree.node_visits[node_index]),
+          children_discounts=state.path_memo.children_discounts.at[
+              state.depth].set(tree.children_discounts[node_index, k_action]),
+          children_values=state.path_memo.children_values.at[state.depth].set(
+              tree.children_values[node_index, k_action]),
+          children_rewards=state.path_memo.children_rewards.at[
+              state.depth].set(tree.children_rewards[node_index, k_action]),
+      )
+
+    with jax.named_scope("osim_replay_check"):
+      depth = state.depth + 1
+      is_before_depth_cutoff = depth < max_depth
+      is_visited = next_node_index != Tree.UNVISITED
+      is_continuing = jnp.logical_and(is_visited, is_before_depth_cutoff)
+
+    embedding = jax.lax.cond(
+        is_continuing,
+        lambda current: embedding_step_fn(action, current),
+        lambda current: current,
+        state.embedding)
+
+    return _ReplaySimulationState(
+        rng_key=rng_key,
+        node_index=node_index,
+        action=k_action,
+        next_node_index=next_node_index,
+        depth=depth,
+        is_continuing=is_continuing,
+        embedding=embedding,
+        path_memo=path_memo)
+
+  root_index = jnp.array(Tree.ROOT_INDEX, dtype=jnp.int32)
+  path_memo = _PathMemo(
+      parent=jnp.zeros((max_depth,), dtype=jnp.int32),
+      action=jnp.zeros((max_depth,), dtype=jnp.int32),
+      node_values=jnp.zeros((max_depth,)),
+      node_visits=jnp.zeros((max_depth,), dtype=jnp.int32),
+      children_discounts=jnp.zeros((max_depth,)),
+      children_values=jnp.zeros((max_depth,)),
+      children_rewards=jnp.zeros((max_depth,)),
+  )
+  root_embedding = jax.tree.map(
+      lambda embedding: embedding[Tree.ROOT_INDEX], tree.embeddings)
+  initial_state = _ReplaySimulationState(
+      rng_key=rng_key,
+      node_index=tree.NO_PARENT,
+      action=tree.NO_PARENT,
+      next_node_index=root_index,
+      depth=jnp.zeros((), dtype=jnp.int32),
+      is_continuing=jnp.array(True),
+      embedding=root_embedding,
+      path_memo=path_memo)
+
+  with jax.named_scope("osim_replay_while"):
+    end_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
+
+  return (end_state.node_index, end_state.action, end_state.path_memo,
+          end_state.depth, end_state.embedding)
+
+
 def expand(
     params: chex.Array,
     rng_key: chex.PRNGKey,
@@ -287,7 +408,9 @@ def expand(
     action: chex.Array,
     k_action: chex.Array,
     next_node_index: chex.Array,
-    num_k_actions: int) -> tuple[Tree[T], chex.Array]:
+    num_k_actions: int,
+    parent_embedding: Optional[base.RecurrentState] = None,
+) -> tuple[Tree[T], chex.Array]:
   """Create and evaluate child nodes from given nodes and unvisited actions.
 
   Args:
@@ -313,8 +436,11 @@ def expand(
   chex.assert_shape([parent_index, action, k_action, next_node_index], (batch_size,))
 
   # Retrieve states for nodes to be evaluated.
-  embedding = jax.tree.map(
-      lambda x: x[batch_range, parent_index], tree.embeddings)
+  if parent_embedding is None:
+    embedding = jax.tree.map(
+        lambda x: x[batch_range, parent_index], tree.embeddings)
+  else:
+    embedding = parent_embedding
 
   # Evaluate and create a new node.
   step, embedding = recurrent_fn(params, rng_key, action, embedding)

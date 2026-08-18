@@ -90,7 +90,8 @@ def search_bnk(
     next_node_index = jnp.where(
         next_node_index == Tree.UNVISITED, i + 1, next_node_index
     )
-    action = tree.children_k_indices[batch_range, parent_index, k_action]
+    action = tree.children_k_indices[
+        batch_range, parent_index, k_action].astype(jnp.int32)
 
     # Expand the chosen leaf; recurrent_fn uses params and expand_key.
     tree = expand(
@@ -371,6 +372,7 @@ def instantiate_tree_from_root(
       node_visits=jnp.zeros(batch_node, dtype=jnp.int32),
       raw_values=jnp.zeros(batch_node, dtype=data_dtype),
       node_values=jnp.zeros(batch_node, dtype=data_dtype),
+      node_depths=jnp.zeros(batch_node, dtype=jnp.int32),
       parents=jnp.full(batch_node, Tree.NO_PARENT, dtype=jnp.int32),
       action_from_parent=jnp.full(
           batch_node, Tree.NO_PARENT, dtype=jnp.int32),

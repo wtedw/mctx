@@ -20,6 +20,7 @@ from mctx._src.action_selection import GumbelMuZeroExtraData
 from mctx._src.action_selection import muzero_action_selection
 from mctx._src.base import ChanceRecurrentFnOutput
 from mctx._src.base import DecisionRecurrentFnOutput
+from mctx._src.base import EmbeddingStepFn
 from mctx._src.base import InteriorActionSelectionFn
 from mctx._src.base import LoopFn
 from mctx._src.base import PolicyOutput
@@ -60,6 +61,7 @@ __version__ = "0.0.5"
 __all__ = (
     "ChanceRecurrentFnOutput",
     "DecisionRecurrentFnOutput",
+    "EmbeddingStepFn",
     "GumbelMuZeroExtraData",
     "InteriorActionSelectionFn",
     "LoopFn",

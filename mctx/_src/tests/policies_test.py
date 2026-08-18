@@ -95,6 +95,98 @@ def _get_deepest_leaf(tree, node_index):
 
 class PoliciesTest(absltest.TestCase):
 
+  def test_gumbel_muzero_policy_opt_replays_real_actions(self):
+    """Replay reconstructs the same embeddings from real BNK actions."""
+    batch_size, num_actions, num_k_actions = 2, 5, 3
+
+    def make_root():
+      return mctx.RootFnOutput(
+          prior_logits=jnp.array([
+              [0.0, 4.0, 1.0, 3.0, 2.0],
+              [2.0, 0.0, 4.0, 1.0, 3.0],
+          ]),
+          value=jnp.zeros((batch_size,)),
+          embedding=jnp.zeros((batch_size, 2), dtype=jnp.int32))
+
+    def embedding_step_fn(action, embedding):
+      # The first field is an order-sensitive encoding of the real actions.
+      return embedding.at[0].set(
+          embedding[0] * 7 + action + 1).at[1].add(1)
+
+    def recurrent_fn(params, rng_key, action, embedding):
+      del params, rng_key
+      new_embedding = jax.vmap(embedding_step_fn)(action, embedding)
+      prior_logits = jnp.broadcast_to(
+          jnp.arange(num_actions, dtype=jnp.float32),
+          (action.shape[0], num_actions))
+      return mctx.RecurrentFnOutput(
+          reward=jnp.zeros(action.shape),
+          discount=jnp.full(action.shape, 0.9),
+          prior_logits=prior_logits,
+          value=jnp.zeros(action.shape)), new_embedding
+
+    def run(root, *, replay):
+      return mctx.gumbel_muzero_policy_opt(
+          params=(),
+          rng_key=jax.random.PRNGKey(1),
+          root=root,
+          recurrent_fn=recurrent_fn,
+          num_k_actions=num_k_actions,
+          num_simulations=8,
+          max_depth=4,
+          max_num_considered_actions=num_k_actions,
+          gumbel_scale=0.0,
+          return_search_tree=True,
+          use_opt_replay_actions=replay,
+          embedding_step_fn=embedding_step_fn if replay else None)
+
+    regular = jax.jit(functools.partial(run, replay=False))(make_root())
+    replayed = jax.jit(functools.partial(run, replay=True))(make_root())
+    regular.action.block_until_ready()
+    replayed.action.block_until_ready()
+
+    np.testing.assert_array_equal(regular.action, replayed.action)
+    np.testing.assert_allclose(
+        regular.action_weights, replayed.action_weights, atol=1e-6)
+    for regular_leaf, replayed_leaf in zip(
+        jax.tree.leaves(regular.search_tree),
+        jax.tree.leaves(replayed.search_tree)):
+      np.testing.assert_allclose(regular_leaf, replayed_leaf, atol=1e-6)
+
+    # Independently reconstruct every allocated node from its parent. This
+    # fails if replay passes a reduced K slot to the environment transition.
+    tree = replayed.search_tree
+    for batch_index in range(batch_size):
+      expected_codes = {tree.ROOT_INDEX: 0}
+      for node_index in range(1, tree.node_visits.shape[1]):
+        parent = int(tree.parents[batch_index, node_index])
+        if parent == tree.NO_PARENT:
+          continue
+        k_action = int(tree.action_from_parent[batch_index, node_index])
+        real_action = int(
+            tree.children_k_indices[batch_index, parent, k_action])
+        expected_codes[node_index] = (
+            expected_codes[parent] * 7 + real_action + 1)
+        self.assertEqual(
+            expected_codes[node_index],
+            int(tree.embeddings[batch_index, node_index, 0]))
+
+  def test_gumbel_muzero_policy_opt_replay_requires_step_fn(self):
+    root = mctx.RootFnOutput(
+        prior_logits=jnp.zeros((1, 2)),
+        value=jnp.zeros((1,)),
+        embedding=jnp.zeros((1, 1)))
+    with self.assertRaisesRegex(ValueError, "embedding_step_fn"):
+      mctx.gumbel_muzero_policy_opt(
+          params=(),
+          rng_key=jax.random.PRNGKey(0),
+          root=root,
+          recurrent_fn=_make_bandit_recurrent_fn(jnp.zeros((1, 2))),
+          num_k_actions=2,
+          num_simulations=1,
+          max_num_considered_actions=2,
+          use_opt_replay_actions=True)
+
   def test_apply_temperature_one(self):
     """Tests temperature=1."""
     logits = jnp.arange(6, dtype=jnp.float32)

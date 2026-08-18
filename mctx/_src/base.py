@@ -48,6 +48,7 @@ class RecurrentFnOutput:
 
 Action = chex.Array
 RecurrentState = Any
+EmbeddingStepFn = Callable[[Action, RecurrentState], RecurrentState]
 RecurrentFn = Callable[
     [Params, chex.PRNGKey, Action, RecurrentState],
     Tuple[RecurrentFnOutput, RecurrentState]]
